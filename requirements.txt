@@ -3,3 +3,4 @@ PyMuPDF
 chromadb
 python-dotenv
 google-genai
+sentence-transformers

@@ -10,7 +10,14 @@ CHUNK_OVERLAP_TOKENS = 100
 # Retrieval
 
 TOP_K = 5
+RETRIEVAL_K = 20   # candidates fetched from Chroma (Stage 1: fast)
+FINAL_K = 5         # chunks kept after cross-encoder reranking (Stage 2: accurate)
 COLLECTION_NAME = "legal_contracts"
+
+
+# Reranking (Cross-Encoder)
+
+CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
 # Generation

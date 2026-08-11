@@ -9,6 +9,7 @@ from rag import config
 
 
 
+
 st.set_page_config(
     page_title="Legal Contract RAG",
     page_icon="⚖️",
@@ -53,15 +54,28 @@ with st.sidebar:
         step=50
     )
 
-    top_k = st.slider(
-        "Top-K",
+    st.divider()
+
+    st.header("Retrieval & Reranking")
+
+    retrieval_k = st.slider(
+        "Retrieval K (Chroma candidates)",
+        min_value=5,
+        max_value=50,
+        value=config.RETRIEVAL_K,
+        step=5,
+        help="How many candidates to fetch from Chroma (Stage 1: fast)"
+    )
+
+    final_k = st.slider(
+        "Final K (after reranking)",
         min_value=1,
         max_value=10,
-        value=config.TOP_K
+        value=config.FINAL_K,
+        help="How many chunks to keep after cross-encoder reranking (Stage 2: accurate)"
     )
 
     build_button = st.button("🔨 Build Index")
-
 
 
 
@@ -109,7 +123,6 @@ if build_button:
 
 
 
-
 st.header("Ask the Contract")
 
 question = st.text_input(
@@ -126,7 +139,7 @@ if st.button("🔍 Ask"):
         st.warning("Please build the index first.")
 
     else:
-        
+        # Pipeline: guardrails → Chroma (retrieval_k) → cross-encoder (final_k) → Gemini
         response = answer_question(question)
 
         # Handle guardrail rejections
@@ -139,17 +152,22 @@ if st.button("🔍 Ask"):
             st.write(response["answer"])
 
             st.divider()
-            st.subheader("📚 Retrieved Evidence")
+            st.subheader("📚 Retrieved Evidence (reranked)")
 
             for i, source in enumerate(response["sources"]):
                 heading_label = source.get("heading", "")
+                rerank_score = source.get("rerank_score")
+
                 with st.expander(
                     f"Chunk {i + 1} — "
                     f"{source['source']} — "
                     f"Page {source['page']}"
                     + (f" — §{heading_label}" if heading_label else "")
                 ):
-                    st.caption(f"Vector distance: {source['distance']}")
+                    score_line = f"Vector distance: {source['distance']}"
+                    if rerank_score is not None:
+                        score_line += f" | Cross-encoder relevance: {rerank_score}"
+                    st.caption(score_line)
 
             st.divider()
             st.caption(f"Confidence: {response['confidence']} · {response['reasoning']}")

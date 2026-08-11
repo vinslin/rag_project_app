@@ -60,15 +60,19 @@ def _extract_sources(results):
 
     metadatas = results["metadatas"][0]
     distances = results["distances"][0]
+    rerank_scores = results.get("rerank_scores", [None] * len(distances))
 
     sources = []
-    for metadata, distance in zip(metadatas, distances):
-        sources.append({
+    for metadata, distance, rerank_score in zip(metadatas, distances, rerank_scores):
+        source = {
             "source": metadata["source"],
             "page": metadata["page"],
             "heading": metadata.get("heading", ""),
             "distance": round(distance, 4),
-        })
+        }
+        if rerank_score is not None:
+            source["rerank_score"] = round(rerank_score, 4)
+        sources.append(source)
 
     return sources
 
@@ -101,28 +105,34 @@ USER QUESTION:
 
 
 class GeminiGenerator:
-    """Generator class that wraps retrieval + generation into a single .generate() call.
+    """Generator class that wraps retrieval + reranking + generation.
 
-    Used by the pipeline module for end-to-end question answering.
+    Pipeline: Chroma (RETRIEVAL_K) → Cross-Encoder (FINAL_K) → Gemini → answer
     """
 
     def __init__(self, model=None):
         self.model = model or config.GENERATION_MODEL
 
-    def generate(self, query, where=None, top_k=config.TOP_K):
-        """Retrieve context and generate an answer.
+    def generate(self, query, where=None,
+                 retrieval_k=config.RETRIEVAL_K,
+                 final_k=config.FINAL_K):
+        """Retrieve, rerank, and generate an answer.
 
         Args:
             query: The user's question.
-            where: Optional ChromaDB metadata filter dict (e.g. {"document_type": "amendment"}).
-            top_k: Number of chunks to retrieve.
+            where: Optional ChromaDB metadata filter dict.
+            retrieval_k: Number of initial candidates from Chroma (Stage 1).
+            final_k: Number of chunks kept after cross-encoder reranking (Stage 2).
 
         Returns:
             Dict matching RESPONSE_SCHEMA: {answer, reasoning, sources, confidence, out_of_scope}
         """
+        from .reranker import rerank  # lazy import to avoid loading model at startup if unused
+
         collection = get_collection(config.COLLECTION_NAME)
 
-        results = retrieve(collection, query, top_k, where=where)
+        # Stage 1 — Fast bi-encoder retrieval (broad net)
+        results = retrieve(collection, query, retrieval_k, where=where)
 
         # Check if we got any results
         if not results["documents"] or not results["documents"][0]:
@@ -134,8 +144,12 @@ class GeminiGenerator:
                 "out_of_scope": False,
             }
 
-        context = _build_context(results)
-        sources = _extract_sources(results)
+        # Stage 2 — Accurate cross-encoder reranking (precise scoring)
+        reranked = rerank(query, results, final_k=final_k)
+
+        # Stage 3 — LLM generation with the best chunks
+        context = _build_context(reranked)
+        sources = _extract_sources(reranked)
 
         prompt = f"""{SYSTEM_PROMPT}
 
@@ -155,7 +169,11 @@ USER QUESTION:
 
         return {
             "answer": response.text,
-            "reasoning": f"Retrieved {len(sources)} chunks and generated answer using {self.model}.",
+            "reasoning": (
+                f"Retrieved {retrieval_k} candidates → "
+                f"reranked to top {len(sources)} → "
+                f"generated answer using {self.model}."
+            ),
             "sources": sources,
             "confidence": "high" if sources else "low",
             "out_of_scope": False,
