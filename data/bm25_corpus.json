@@ -1,0 +1,14 @@
+[
+  {
+    "text": "5. Retrieval Challenge Cases These examples are intentionally designed so that keyword and semantic retrieval behave differently. Test Query Expected Strength Why What does Section 8.2 say? BM25 Exact section identifier and exact wording. What is the current cancellation notice period? Semantic + Hybrid The document uses 'termination', while the query uses 'cancellation'. How long does the customer have to pay an undisputed bill? Semantic + Hybrid The contract says 'invoice' and 'payable'; the query uses 'bill'. What is the payment deadline in Amendment 1? BM25 + Hybrid Exact amendment reference plus payment concept. Which amendment changed the termination notice? BM25 + Hybrid Exact phrase 'Amendment' and termination terminology. What happens during an uncontrollable event like a natural disaster? Semantic + Hybrid Tests conceptual similarity to Force Majeure. What is SOW-ATLAS-2026-01? BM25 Exact identifier. Who owns work created specifically for the customer? Semantic Tests paraphrase of intellectual-property ownership language. How much time is allowed for defect reporting? Semantic Query paraphrases the acceptance clause. 6. Recommended RAG Experiment Run each query three ways: (1) BM25 only, (2) ChromaDB vector search only, and (3) Hybrid = BM25 + vector retrieval + RRF. For each method, inspect the top 5 or top 10",
+    "source": "hybrid_search_legal_contract_test.pdf",
+    "page": 2,
+    "heading": "Preamble"
+  },
+  {
+    "text": "much time is allowed for defect reporting? Semantic Query paraphrases the acceptance clause. 6. Recommended RAG Experiment Run each query three ways: (1) BM25 only, (2) ChromaDB vector search only, and (3) Hybrid = BM25 + vector retrieval + RRF. For each method, inspect the top 5 or top 10 chunks before the LLM sees them. This makes it possible to determine whether a failure came from keyword retrieval, semantic retrieval, fusion, or generation. Expected pattern: BM25 should be strongest for exact identifiers such as Section 8.2 and SOW-ATLAS-2026-01. Vector search should be stronger for paraphrases such as 'cancellation notice' versus 'termination notice'. Hybrid retrieval should recover relevant chunks from both categories. This reflects the standard motivation for hybrid retrieval: BM25 provides lexical exactness while dense retrieval provides semantic generalization. IciteIturn0search0Iturn0search7I",
+    "source": "hybrid_search_legal_contract_test.pdf",
+    "page": 2,
+    "heading": "Preamble"
+  }
+]

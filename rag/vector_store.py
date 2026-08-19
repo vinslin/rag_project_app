@@ -1,5 +1,6 @@
 import chromadb
 from rag.embeddings import create_embedding
+from rag.bm25_search import save_corpus, clear_corpus
 
 
 chroma_client = chromadb.PersistentClient(path="./data/chroma")
@@ -17,6 +18,8 @@ def build_index(chunks, collection_name, source="unknown", page=0):
 
     if existing["ids"]:
         collection.delete(ids=existing["ids"])
+        # Also clear the BM25 corpus when rebuilding
+        clear_corpus()
 
     for chunk in chunks:
 
@@ -34,6 +37,9 @@ def build_index(chunks, collection_name, source="unknown", page=0):
                 "heading": chunk.heading
             }]
         )
+
+    # Persist chunks for BM25 keyword search
+    save_corpus(chunks, source=source, page=page)
 
     return collection
 

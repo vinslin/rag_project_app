@@ -58,13 +58,25 @@ with st.sidebar:
 
     st.header("Retrieval & Reranking")
 
+    search_mode = st.radio(
+        "Search Mode",
+        options=["hybrid", "vector", "bm25"],
+        format_func=lambda x: {
+            "hybrid": "🔀 Hybrid (RRF Fusion)",
+            "vector": "🧠 Vector Only",
+            "bm25": "🔤 BM25 Only",
+        }[x],
+        index=0,
+        help="Hybrid combines semantic + keyword search via Reciprocal Rank Fusion"
+    )
+
     retrieval_k = st.slider(
-        "Retrieval K (Chroma candidates)",
+        "Retrieval K (candidates)",
         min_value=5,
         max_value=50,
         value=config.RETRIEVAL_K,
         step=5,
-        help="How many candidates to fetch from Chroma (Stage 1: fast)"
+        help="How many candidates to fetch from each search method (Stage 1: fast)"
     )
 
     final_k = st.slider(
@@ -139,8 +151,8 @@ if st.button("🔍 Ask"):
         st.warning("Please build the index first.")
 
     else:
-        # Pipeline: guardrails → Chroma (retrieval_k) → cross-encoder (final_k) → Gemini
-        response = answer_question(question)
+        # Pipeline: guardrails → retrieval (mode-dependent) → cross-encoder (final_k) → Gemini
+        response = answer_question(question, search_mode=search_mode)
 
         # Handle guardrail rejections
         if response["out_of_scope"]:
@@ -157,6 +169,7 @@ if st.button("🔍 Ask"):
             for i, source in enumerate(response["sources"]):
                 heading_label = source.get("heading", "")
                 rerank_score = source.get("rerank_score")
+                rrf_score = source.get("rrf_score")
 
                 with st.expander(
                     f"Chunk {i + 1} — "
@@ -165,6 +178,8 @@ if st.button("🔍 Ask"):
                     + (f" — §{heading_label}" if heading_label else "")
                 ):
                     score_line = f"Vector distance: {source['distance']}"
+                    if rrf_score is not None:
+                        score_line += f" | RRF score: {rrf_score}"
                     if rerank_score is not None:
                         score_line += f" | Cross-encoder relevance: {rerank_score}"
                     st.caption(score_line)

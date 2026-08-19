@@ -115,7 +115,8 @@ class GeminiGenerator:
 
     def generate(self, query, where=None,
                  retrieval_k=config.RETRIEVAL_K,
-                 final_k=config.FINAL_K):
+                 final_k=config.FINAL_K,
+                 search_mode=config.SEARCH_MODE):
         """Retrieve, rerank, and generate an answer.
 
         Args:
@@ -123,16 +124,26 @@ class GeminiGenerator:
             where: Optional ChromaDB metadata filter dict.
             retrieval_k: Number of initial candidates from Chroma (Stage 1).
             final_k: Number of chunks kept after cross-encoder reranking (Stage 2).
+            search_mode: "hybrid" (RRF fusion), "vector" (semantic only), or "bm25" (keyword only).
 
         Returns:
             Dict matching RESPONSE_SCHEMA: {answer, reasoning, sources, confidence, out_of_scope}
         """
         from .reranker import rerank  # lazy import to avoid loading model at startup if unused
 
-        collection = get_collection(config.COLLECTION_NAME)
-
-        # Stage 1 — Fast bi-encoder retrieval (broad net)
-        results = retrieve(collection, query, retrieval_k, where=where)
+        # Stage 1 — Retrieval (depends on search_mode)
+        if search_mode == "hybrid":
+            from .hybrid_search import hybrid_retrieve
+            results = hybrid_retrieve(query, top_k=retrieval_k, where=where)
+            retrieval_label = "Hybrid (Vector + BM25 → RRF)"
+        elif search_mode == "bm25":
+            from .bm25_search import bm25_retrieve
+            results = bm25_retrieve(query, top_k=retrieval_k)
+            retrieval_label = "BM25 keyword search"
+        else:  # "vector"
+            collection = get_collection(config.COLLECTION_NAME)
+            results = retrieve(collection, query, retrieval_k, where=where)
+            retrieval_label = "Vector (semantic) search"
 
         # Check if we got any results
         if not results["documents"] or not results["documents"][0]:
@@ -147,9 +158,25 @@ class GeminiGenerator:
         # Stage 2 — Accurate cross-encoder reranking (precise scoring)
         reranked = rerank(query, results, final_k=final_k)
 
+        # Carry forward RRF scores if present (from hybrid search)
+        if "rrf_scores" in results:
+            # Map doc text → rrf_score for lookup after reranking
+            rrf_map = {}
+            for doc, score in zip(results["documents"][0], results["rrf_scores"]):
+                rrf_map[doc] = score
+            reranked["rrf_scores"] = [
+                rrf_map.get(doc, None) for doc in reranked["documents"][0]
+            ]
+
         # Stage 3 — LLM generation with the best chunks
         context = _build_context(reranked)
         sources = _extract_sources(reranked)
+
+        # Attach RRF scores to sources if available
+        rrf_scores = reranked.get("rrf_scores", [])
+        for i, source in enumerate(sources):
+            if i < len(rrf_scores) and rrf_scores[i] is not None:
+                source["rrf_score"] = round(rrf_scores[i], 6)
 
         prompt = f"""{SYSTEM_PROMPT}
 
@@ -170,7 +197,7 @@ USER QUESTION:
         return {
             "answer": response.text,
             "reasoning": (
-                f"Retrieved {retrieval_k} candidates → "
+                f"{retrieval_label}: {retrieval_k} candidates → "
                 f"reranked to top {len(sources)} → "
                 f"generated answer using {self.model}."
             ),

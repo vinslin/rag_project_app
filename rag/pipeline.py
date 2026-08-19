@@ -11,7 +11,7 @@ def detect_metadata_filter(query):
     return None
 
 
-def answer_question(query, document_type=None, backend=None):
+def answer_question(query, document_type=None, backend=None, search_mode=None):
 
     # Screen the query through guardrails before anything else;
     # rejections carry out_of_scope=true with a fixed rejection message
@@ -34,4 +34,4 @@ def answer_question(query, document_type=None, backend=None):
     where = {"document_type": document_type} if document_type else detect_metadata_filter(query)
 
     generator = get_generator(backend)
-    return generator.generate(query, where=where)
+    return generator.generate(query, where=where, search_mode=search_mode or config.SEARCH_MODE)

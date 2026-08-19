@@ -15,6 +15,13 @@ FINAL_K = 5         # chunks kept after cross-encoder reranking (Stage 2: accura
 COLLECTION_NAME = "legal_contracts"
 
 
+# BM25 & Hybrid Search
+
+BM25_CORPUS_PATH = "./data/bm25_corpus.json"  # persisted corpus for BM25 indexing
+RRF_K = 60                                     # RRF constant (standard default)
+SEARCH_MODE = "hybrid"                          # "hybrid", "vector", or "bm25"
+
+
 # Reranking (Cross-Encoder)
 
 CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"

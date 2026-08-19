@@ -4,3 +4,4 @@ chromadb
 python-dotenv
 google-genai
 sentence-transformers
+rank-bm25
