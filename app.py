@@ -164,25 +164,74 @@ if st.button("🔍 Ask"):
             st.write(response["answer"])
 
             st.divider()
-            st.subheader("📚 Retrieved Evidence (reranked)")
 
-            for i, source in enumerate(response["sources"]):
-                heading_label = source.get("heading", "")
-                rerank_score = source.get("rerank_score")
-                rrf_score = source.get("rrf_score")
+            # ── All Retrieved Chunks ──────────────────────────────
 
-                with st.expander(
-                    f"Chunk {i + 1} — "
-                    f"{source['source']} — "
-                    f"Page {source['page']}"
-                    + (f" — §{heading_label}" if heading_label else "")
-                ):
-                    score_line = f"Vector distance: {source['distance']}"
-                    if rrf_score is not None:
-                        score_line += f" | RRF score: {rrf_score}"
-                    if rerank_score is not None:
-                        score_line += f" | Cross-encoder relevance: {rerank_score}"
-                    st.caption(score_line)
+            vector_chunks = response.get("vector_chunks", [])
+            bm25_chunks = response.get("bm25_chunks", [])
+            final_sources = response.get("sources", [])
+
+            # Build tab list based on what's available
+            tab_labels = []
+            tab_data = []
+
+            if vector_chunks:
+                tab_labels.append(f"🧠 Semantic Retrieval ({len(vector_chunks)})")
+                tab_data.append(("vector", vector_chunks))
+            if bm25_chunks:
+                tab_labels.append(f"🔤 BM25 Retrieval ({len(bm25_chunks)})")
+                tab_data.append(("bm25", bm25_chunks))
+            tab_labels.append(f"✅ Final Reranked ({len(final_sources)})")
+            tab_data.append(("final", final_sources))
+
+            tabs = st.tabs(tab_labels)
+
+            for tab, (tab_type, chunks) in zip(tabs, tab_data):
+                with tab:
+                    if tab_type == "final":
+                        # Final reranked sources (used for answer generation)
+                        for i, source in enumerate(chunks):
+                            heading_label = source.get("heading", "")
+                            rerank_score = source.get("rerank_score")
+                            rrf_score = source.get("rrf_score")
+                            retrieved_by = source.get("retrieved_by", "")
+                            chunk_text = source.get("text", "")
+
+                            origin_badge = {
+                                "vector": "🧠 Semantic",
+                                "bm25": "🔤 BM25",
+                                "both": "🔀 Both",
+                                "hybrid": "🔀 Hybrid",
+                            }.get(retrieved_by, retrieved_by)
+
+                            with st.expander(
+                                f"#{i + 1} — {origin_badge} — "
+                                f"{source['source']} — Page {source['page']}"
+                                + (f" — §{heading_label}" if heading_label else ""),
+                                expanded=(i == 0)
+                            ):
+                                score_parts = [f"**Distance:** `{source['distance']}`"]
+                                if rrf_score is not None:
+                                    score_parts.append(f"**RRF:** `{rrf_score}`")
+                                if rerank_score is not None:
+                                    score_parts.append(f"**Rerank:** `{rerank_score}`")
+                                st.caption(" · ".join(score_parts))
+                                st.markdown("---")
+                                st.markdown(chunk_text)
+                    else:
+                        # Raw retrieved chunks (vector or BM25)
+                        score_label = "Vector Distance" if tab_type == "vector" else "BM25 Score"
+                        for chunk in chunks:
+                            heading_label = chunk.get("heading", "")
+                            with st.expander(
+                                f"Rank {chunk['rank']} — "
+                                f"{chunk['source']} — Page {chunk['page']}"
+                                + (f" — §{heading_label}" if heading_label else ""),
+                                expanded=(chunk["rank"] == 1)
+                            ):
+                                st.caption(f"**{score_label}:** `{chunk['score']}`")
+                                st.markdown("---")
+                                st.markdown(chunk["text"])
 
             st.divider()
             st.caption(f"Confidence: {response['confidence']} · {response['reasoning']}")
