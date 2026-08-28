@@ -1,1 +1,10 @@
+# Environment variables
 .env
+
+# RAG data
+data/
+documnets/
+
+# Python cache
+__pycache__/
+*.pyc
