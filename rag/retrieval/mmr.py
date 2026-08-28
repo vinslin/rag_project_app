@@ -13,8 +13,8 @@ where λ controls the relevance-vs-diversity tradeoff:
 
 import numpy as np
 
-from . import config
-from .embeddings import create_embedding
+from rag import config
+from rag.embeddings.embeddings import create_embedding
 
 
 def _cosine_similarity(a, b):

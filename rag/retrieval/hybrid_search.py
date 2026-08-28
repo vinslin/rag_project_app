@@ -7,9 +7,9 @@ where k is a constant (default 60).  Documents appearing in both result sets
 receive contributions from both, boosting them above single-source hits.
 """
 
-from . import config
-from .vector_store import retrieve as vector_retrieve, get_collection
-from .bm25_search import bm25_retrieve
+from rag import config
+from rag.retrieval.vector_store import retrieve as vector_retrieve, get_collection
+from rag.retrieval.bm25_search import bm25_retrieve
 
 
 def rrf_fuse(vector_results, bm25_results, top_k, rrf_k=config.RRF_K):

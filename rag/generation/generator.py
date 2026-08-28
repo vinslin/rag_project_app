@@ -4,37 +4,15 @@ import os
 from google import genai
 from dotenv import load_dotenv
 
-from . import config
-from .vector_store import retrieve, get_collection
-from .embeddings import create_embedding
+from rag import config
+from rag.retrieval.vector_store import retrieve, get_collection
+from rag.generation.prompts import SYSTEM_PROMPT
 
 load_dotenv()
 
 API_KEY = os.getenv("GOOGLE_API_KEY")
 
 client = genai.Client(api_key=API_KEY)
-
-
-SYSTEM_PROMPT = """
-You are a legal contract document assistant.
-
-Answer the user's question ONLY using the
-provided amendment documents.
-
-Rules:
-
-1. Do not use outside knowledge.
-2. Do not invent contract terms.
-3. Do not make assumptions.
-4. If the answer cannot be found in the
-   provided context, say:
-
-"I could not find this information in the
-provided amendment documents."
-
-5. Give a concise answer.
-6. Mention the relevant source and page.
-"""
 
 
 def _build_context(results):
@@ -109,7 +87,7 @@ USER QUESTION:
 class GeminiGenerator:
     """Generator class that wraps retrieval + reranking + generation.
 
-    Pipeline: Chroma (RETRIEVAL_K) → Cross-Encoder (FINAL_K) → Gemini → answer
+    Pipeline: Retrieval (RETRIEVAL_K) → MMR (MMR_K) → Cross-Encoder (FINAL_K) → Gemini → answer
     """
 
     def __init__(self, model=None):
@@ -137,22 +115,22 @@ class GeminiGenerator:
         Returns:
             Dict matching RESPONSE_SCHEMA + raw chunk lists for UI display.
         """
-        from .reranker import rerank  # lazy import to avoid loading model at startup if unused
-        from .mmr import mmr_rerank
+        from rag.reranking.reranker import rerank
+        from rag.retrieval.mmr import mmr_rerank
 
         # Stage 1 — Retrieval (depends on search_mode)
         raw_vector_chunks = []
         raw_bm25_chunks = []
 
         if search_mode == "hybrid":
-            from .hybrid_search import hybrid_retrieve
+            from rag.retrieval.hybrid_search import hybrid_retrieve
             results = hybrid_retrieve(query, top_k=retrieval_k, where=where)
             retrieval_label = "Hybrid (Vector + BM25 → RRF)"
             # Extract raw results attached by hybrid_retrieve
             raw_vector_chunks = self._format_raw_chunks(results.get("vector_results", {}), "vector")
             raw_bm25_chunks = self._format_raw_chunks(results.get("bm25_results", {}), "bm25")
         elif search_mode == "bm25":
-            from .bm25_search import bm25_retrieve
+            from rag.retrieval.bm25_search import bm25_retrieve
             results = bm25_retrieve(query, top_k=retrieval_k)
             retrieval_label = "BM25 keyword search"
             raw_bm25_chunks = self._format_raw_chunks(results, "bm25")

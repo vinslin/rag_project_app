@@ -3,7 +3,7 @@
 import re
 from dataclasses import dataclass
 
-from . import config
+from rag import config
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 

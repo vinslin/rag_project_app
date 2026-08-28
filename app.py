@@ -1,13 +1,11 @@
 import os
 import streamlit as st
 
-from rag.pdf_loader import load_pdf
-from rag.chunker import chunk_document
-from rag.vector_store import build_index, clear_index
+from rag.ingestion.pdf_loader import load_pdf
+from rag.ingestion.chunker import chunk_document
+from rag.retrieval.vector_store import build_index, clear_index
 from rag.pipeline import answer_question
 from rag import config
-
-
 
 
 st.set_page_config(
@@ -21,7 +19,6 @@ st.title("⚖️ Legal Contract RAG")
 st.caption(
     "Ask questions about your amendment documents"
 )
-
 
 
 with st.sidebar:
@@ -108,7 +105,6 @@ with st.sidebar:
     build_button = st.button("🔨 Build Index")
 
 
-
 if build_button:
 
     if not uploaded_files:
@@ -153,7 +149,6 @@ if build_button:
         st.session_state.chunk_count = len(all_chunks)
 
         st.success(f"Indexed {len(all_chunks)} chunks from {len(uploaded_files)} file(s).")
-
 
 
 st.header("Ask the Contract")

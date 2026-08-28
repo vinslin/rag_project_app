@@ -1,6 +1,6 @@
+import os
 from google import genai
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
@@ -10,7 +10,7 @@ client = genai.Client(api_key=API_KEY)
 
 
 def create_embedding(text):
-    """Gemini vachi embedding pannu."""
+    """Generate dense embeddings using Gemini embedding model."""
 
     result = client.models.embed_content(
         model="gemini-embedding-001",

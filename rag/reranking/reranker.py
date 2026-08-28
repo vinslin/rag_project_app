@@ -1,7 +1,6 @@
 from sentence_transformers import CrossEncoder
 
-from . import config
-
+from rag import config
 
 
 cross_encoder = CrossEncoder(config.CROSS_ENCODER_MODEL)

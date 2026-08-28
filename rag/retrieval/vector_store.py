@@ -1,6 +1,6 @@
 import chromadb
-from rag.embeddings import create_embedding
-from rag.bm25_search import save_corpus, clear_corpus
+from rag.embeddings.embeddings import create_embedding
+from rag.retrieval.bm25_search import save_corpus, clear_corpus
 
 
 chroma_client = chromadb.PersistentClient(path="./data/chroma")
