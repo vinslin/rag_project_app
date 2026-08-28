@@ -3,7 +3,7 @@
 
 # RAG data
 data/
-documnets/
+
 
 # Python cache
 __pycache__/
