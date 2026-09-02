@@ -1,25 +1,33 @@
 import chromadb
-from rag.embeddings import create_embedding
-from rag.bm25_search import save_corpus, clear_corpus
+from rag.embeddings.embeddings import create_embedding
+from rag.retrieval.bm25_search import save_corpus, clear_corpus
 
 
 chroma_client = chromadb.PersistentClient(path="./data/chroma")
 
 
+def clear_index(collection_name):
+    """Clear an existing ChromaDB collection and the BM25 corpus.
+
+    Call this ONCE before indexing new documents, not per-page.
+    """
+    collection = chroma_client.get_or_create_collection(name=collection_name)
+    existing = collection.get()
+    if existing["ids"]:
+        collection.delete(ids=existing["ids"])
+    clear_corpus()
+
+
 def build_index(chunks, collection_name, source="unknown", page=0):
-    """Build (or rebuild) a ChromaDB collection from Chunk dataclass objects."""
+    """Add chunks to a ChromaDB collection (append-only).
+
+    Call clear_index() once before the first call to build_index()
+    when rebuilding from scratch.
+    """
 
     collection = chroma_client.get_or_create_collection(
         name=collection_name
     )
-
-    # Clear existing collection
-    existing = collection.get()
-
-    if existing["ids"]:
-        collection.delete(ids=existing["ids"])
-        # Also clear the BM25 corpus when rebuilding
-        clear_corpus()
 
     for chunk in chunks:
 

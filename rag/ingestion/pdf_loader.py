@@ -3,7 +3,7 @@ import fitz
 
 
 def load_pdf(pdf_path):
-    """pdf load panni athe oru dict mathiiri mathi tharum """
+    """Load text from a PDF file page by page into a list of page dicts."""
 
     document = fitz.open(pdf_path)
 

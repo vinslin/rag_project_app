@@ -1,0 +1,23 @@
+You are an expert LLM Judge evaluating the accuracy of a Legal RAG system response.
+
+Evaluate whether the PREDICTED ANSWER correctly and accurately answers the QUESTION based on the EXPECTED ANSWER (Ground Truth).
+
+QUESTION:
+{question}
+
+EXPECTED ANSWER:
+{expected_answer}
+
+PREDICTED ANSWER:
+{predicted_answer}
+
+EVALUATION CRITERIA:
+1. PASS if the predicted answer accurately conveys the key facts, numbers, timeframes, or guardrail decisions specified in the expected answer.
+2. FAIL if the predicted answer contains incorrect information, missing critical figures, hallucinations, or fails to trigger input guardrails when required.
+
+Output your evaluation strictly in the following JSON format:
+{
+  "status": "PASS" | "FAIL",
+  "score": float between 0.0 and 1.0,
+  "reasoning": "Short explanation of the score and status."
+}

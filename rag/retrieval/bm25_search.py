@@ -9,7 +9,7 @@ import os
 
 from rank_bm25 import BM25Okapi
 
-from . import config
+from rag import config
 
 
 # ---------------------------------------------------------------------------

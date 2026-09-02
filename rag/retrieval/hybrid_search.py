@@ -7,9 +7,9 @@ where k is a constant (default 60).  Documents appearing in both result sets
 receive contributions from both, boosting them above single-source hits.
 """
 
-from . import config
-from .vector_store import retrieve as vector_retrieve, get_collection
-from .bm25_search import bm25_retrieve
+from rag import config
+from rag.retrieval.vector_store import retrieve as vector_retrieve, get_collection
+from rag.retrieval.bm25_search import bm25_retrieve
 
 
 def rrf_fuse(vector_results, bm25_results, top_k, rrf_k=config.RRF_K):
@@ -31,7 +31,7 @@ def rrf_fuse(vector_results, bm25_results, top_k, rrf_k=config.RRF_K):
             distances  – list[list[float]]  (original vector distances where available)
             rrf_scores – list[float]
     """
-    # doc_text → {rrf_score, metadata, distance}
+    # doc_text → {rrf_score, metadata, distance, origin}
     doc_map = {}
 
     # --- Score vector results ---
@@ -45,6 +45,7 @@ def rrf_fuse(vector_results, bm25_results, top_k, rrf_k=config.RRF_K):
             "rrf_score": rrf_score,
             "metadata": meta,
             "distance": dist,
+            "origin": "vector",
         }
 
     # --- Score BM25 results ---
@@ -57,11 +58,13 @@ def rrf_fuse(vector_results, bm25_results, top_k, rrf_k=config.RRF_K):
         if doc in doc_map:
             # Document found in both — add RRF scores (the fusion boost)
             doc_map[doc]["rrf_score"] += rrf_score
+            doc_map[doc]["origin"] = "both"
         else:
             doc_map[doc] = {
                 "rrf_score": rrf_score,
                 "metadata": meta,
                 "distance": dist,
+                "origin": "bm25",
             }
 
     # --- Sort by fused RRF score descending and take top_k ---
@@ -71,12 +74,14 @@ def rrf_fuse(vector_results, bm25_results, top_k, rrf_k=config.RRF_K):
     metadatas = [item[1]["metadata"] for item in ranked]
     distances = [item[1]["distance"] for item in ranked]
     rrf_scores = [round(item[1]["rrf_score"], 6) for item in ranked]
+    retrieval_origins = [item[1]["origin"] for item in ranked]
 
     return {
         "documents": [documents],
         "metadatas": [metadatas],
         "distances": [distances],
         "rrf_scores": rrf_scores,
+        "retrieval_origins": retrieval_origins,
     }
 
 
@@ -102,5 +107,9 @@ def hybrid_retrieve(query, top_k=config.RETRIEVAL_K, where=None, rrf_k=config.RR
 
     # Stage 1c — Reciprocal Rank Fusion
     fused = rrf_fuse(vector_results, bm25_results, top_k, rrf_k)
+
+    # Attach raw results so the UI can show all retrieved chunks
+    fused["vector_results"] = vector_results
+    fused["bm25_results"] = bm25_results
 
     return fused

@@ -10,8 +10,8 @@ CHUNK_OVERLAP_TOKENS = 100
 # Retrieval
 
 TOP_K = 5
-RETRIEVAL_K = 20   # candidates fetched from Chroma (Stage 1: fast)
-FINAL_K = 5         # chunks kept after cross-encoder reranking (Stage 2: accurate)
+RETRIEVAL_K = 50    # candidates from each search method (Stage 1: RRF fusion)
+FINAL_K = 5         # chunks kept after cross-encoder reranking (Stage 4: accurate)
 COLLECTION_NAME = "legal_contracts"
 
 
@@ -20,6 +20,12 @@ COLLECTION_NAME = "legal_contracts"
 BM25_CORPUS_PATH = "./data/bm25_corpus.json"  # persisted corpus for BM25 indexing
 RRF_K = 60                                     # RRF constant (standard default)
 SEARCH_MODE = "hybrid"                          # "hybrid", "vector", or "bm25"
+
+
+# MMR (Maximal Marginal Relevance)
+
+MMR_K = 20          # diverse chunks to keep after MMR (Stage 2)
+MMR_LAMBDA = 0.7    # relevance-vs-diversity tradeoff (1.0 = pure relevance, 0.0 = pure diversity)
 
 
 # Reranking (Cross-Encoder)

@@ -1,7 +1,6 @@
-
-from . import config
-from .generator import get_generator
-from .guardrails import screen_query
+from rag import config
+from rag.generation.generator import get_generator
+from rag.guards.guardrails import screen_query
 
 
 def detect_metadata_filter(query):
