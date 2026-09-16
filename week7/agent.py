@@ -8,21 +8,16 @@ Budgets enforced every iteration:
 
 Each iteration re-sends the full message history to the model, so per-lap
 tokens are summed — not just the final call.
+
+Uses Groq (OpenAI-compatible chat completions + tool calling) as the LLM.
 """
 
-import os
-import time
 import json
-
-from google import genai
-from google.genai import types
-from dotenv import load_dotenv
+import time
 
 from rag import config
 from week7.tools import TOOL_DECLARATIONS, TOOL_FUNCTIONS
-from week7.utils import gemini_call_with_retry
-
-load_dotenv()
+from week7.llm_client import get_client, groq_call_with_retry, to_groq_tools
 
 # ── Budget defaults ──────────────────────────────────────────────────────────
 
@@ -31,10 +26,10 @@ MAX_TOKENS     = 8_000
 MAX_COST       = 0.05      # USD
 MAX_WALL_CLOCK = 30.0      # seconds
 
-# ── Pricing (Gemini Flash approximate — same rate for both systems) ──────────
+# ── Pricing (Groq openai/gpt-oss-20b, approximate — same rate for both systems) ──
 
-INPUT_PRICE_PER_M  = 0.075  # $/1 M input tokens
-OUTPUT_PRICE_PER_M = 0.30   # $/1 M output tokens
+INPUT_PRICE_PER_M  = 0.10   # $/1 M input tokens
+OUTPUT_PRICE_PER_M = 0.50   # $/1 M output tokens
 
 MODEL = config.GENERATION_MODEL
 
@@ -51,6 +46,8 @@ SYSTEM_PROMPT = (
     "get_effective_date with the specific version enum.\n"
     "Always cite which contract version and section your answer comes from."
 )
+
+_TOOLS = to_groq_tools(TOOL_DECLARATIONS)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -93,26 +90,11 @@ def run_agent(
     if log is None:
         log = []
 
-    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+    client = get_client()
 
-    # Build Gemini tool object from declarations
-    tool_obj = types.Tool(function_declarations=[
-        types.FunctionDeclaration(
-            name=d["name"],
-            description=d["description"],
-            parameters=d["parameters"],
-        )
-        for d in TOOL_DECLARATIONS
-    ])
-
-    gen_config = types.GenerateContentConfig(
-        tools=[tool_obj],
-        system_instruction=SYSTEM_PROMPT,
-    )
-
-    contents: list[types.Content] = [
-        types.Content(role="user",
-                      parts=[types.Part.from_text(text=question)])
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": question},
     ]
 
     total_input_tokens  = 0
@@ -155,24 +137,24 @@ def run_agent(
         iteration += 1
         log.append(f"\n--- Iteration {iteration} ---")
 
-        # ── Call Gemini (with retry on rate-limit) ────────────────────────
+        # ── Call Groq (with retry on rate-limit / transient errors) ──────
         try:
-            response = gemini_call_with_retry(
+            response = groq_call_with_retry(
                 client,
                 model=MODEL,
-                contents=contents,
-                config=gen_config,
+                messages=messages,
+                tools=_TOOLS,
                 log=log,
             )
         except Exception as exc:
-            log.append(f"[ERROR] Gemini call failed: {exc}")
+            log.append(f"[ERROR] Groq call failed: {exc}")
             budget_termination = f"ERROR: {exc}"
             break
 
         # ── Track tokens (cumulative — every lap re-sends history) ───────
-        if hasattr(response, "usage_metadata") and response.usage_metadata:
-            i_tok = response.usage_metadata.prompt_token_count or 0
-            o_tok = response.usage_metadata.candidates_token_count or 0
+        if getattr(response, "usage", None):
+            i_tok = response.usage.prompt_tokens or 0
+            o_tok = response.usage.completion_tokens or 0
             total_input_tokens  += i_tok
             total_output_tokens += o_tok
             log.append(f"Tokens this turn:  input={i_tok}  output={o_tok}")
@@ -182,43 +164,43 @@ def run_agent(
                 f"total={total_input_tokens + total_output_tokens}"
             )
 
-        # ── Process response parts ───────────────────────────────────────
-        candidate = response.candidates[0]
-        has_fc = False
-        fn_parts: list = []
+        # ── Process response ─────────────────────────────────────────────
+        msg = response.choices[0].message
 
-        for part in candidate.content.parts:
-            if part.function_call:
-                has_fc = True
-                fc = part.function_call
-                args = dict(fc.args) if fc.args else {}
-                log.append(f"Tool call: {fc.name}({json.dumps(args)})")
+        if msg.tool_calls:
+            messages.append({
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in msg.tool_calls
+                ],
+            })
 
-                result = _dispatch_tool(fc.name, args)
+            for tc in msg.tool_calls:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                log.append(f"Tool call: {tc.function.name}({json.dumps(args)})")
+
+                result = _dispatch_tool(tc.function.name, args)
                 tools_called.append({
-                    "name": fc.name,
+                    "name": tc.function.name,
                     "args": args,
                     "result_preview": result[:300],
                 })
                 log.append(f"Tool result: {result[:300]}")
 
-                fn_parts.append(
-                    types.Part.from_function_response(
-                        name=fc.name,
-                        response={"result": result},
-                    )
-                )
-
-        if has_fc:
-            # Append model's tool-call turn + tool results for next lap
-            contents.append(candidate.content)
-            contents.append(
-                types.Content(role="user", parts=fn_parts)
-            )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
         else:
-            # Text answer → done
-            final_answer = candidate.content.parts[0].text
-            log.append(f"Final answer received (len={len(final_answer)})")
+            final_answer = msg.content
+            log.append(f"Final answer received (len={len(final_answer or '')})")
             break
 
     # ── Check iteration-limit budget ─────────────────────────────────────

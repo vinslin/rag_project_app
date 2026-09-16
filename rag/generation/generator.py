@@ -1,18 +1,11 @@
 """Answer generation: build RAG prompt and call the LLM."""
 
-import os
-from google import genai
-from dotenv import load_dotenv
-
 from rag import config
 from rag.retrieval.vector_store import retrieve, get_collection
 from rag.generation.prompts import SYSTEM_PROMPT
+from week7.llm_client import get_client, groq_call_with_retry
 
-load_dotenv()
-
-API_KEY = os.getenv("GOOGLE_API_KEY")
-
-client = genai.Client(api_key=API_KEY)
+client = get_client()
 
 
 def _build_context(results):
@@ -58,7 +51,7 @@ def _extract_sources(results):
 
 
 def generate_answer(question, results):
-    """Generate an answer using retrieved context and the Gemini model.
+    """Generate an answer using retrieved context and the configured LLM.
 
     Returns plain text answer (backwards-compatible with the old interface).
     """
@@ -76,12 +69,12 @@ USER QUESTION:
 {question}
 """
 
-    response = client.models.generate_content(
-        model=config.GENERATION_MODEL,
-        contents=prompt
+    response = groq_call_with_retry(
+        client, model=config.GENERATION_MODEL,
+        messages=[{"role": "user", "content": prompt}],
     )
 
-    return response.text
+    return response.choices[0].message.content
 
 
 class GeminiGenerator:
@@ -216,16 +209,16 @@ USER QUESTION:
 {query}
 """
 
-        response = client.models.generate_content(
-            model=self.model,
-            contents=prompt
+        response = groq_call_with_retry(
+            client, model=self.model,
+            messages=[{"role": "user", "content": prompt}],
         )
 
         n_rrf = len(results.get("documents", [[]])[0])
         n_mmr = len(mmr_results.get("documents", [[]])[0])
 
         return {
-            "answer": response.text,
+            "answer": response.choices[0].message.content,
             "reasoning": (
                 f"{retrieval_label}: {n_rrf} candidates → "
                 f"MMR top {n_mmr} diverse (λ={mmr_lambda}) → "

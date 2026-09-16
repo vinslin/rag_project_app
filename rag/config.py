@@ -35,7 +35,7 @@ CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # Generation
 
-GENERATION_MODEL = "gemini-3.5-flash"
+GENERATION_MODEL = "openai/gpt-oss-20b"   # served via Groq (cheap, tool-calling capable)
 
 
 # Guardrails

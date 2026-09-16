@@ -8,22 +8,16 @@ Steps (always in this order, no branching):
   4.  Single LLM call    → generate the answer from all gathered context
 """
 
-import os
 import time
-
-from google import genai
-from dotenv import load_dotenv
 
 from rag import config
 from week7.tools import search_clause, get_effective_date, get_definitions
-from week7.utils import gemini_call_with_retry
-
-load_dotenv()
+from week7.llm_client import get_client, groq_call_with_retry
 
 MODEL = config.GENERATION_MODEL
 
-INPUT_PRICE_PER_M  = 0.075
-OUTPUT_PRICE_PER_M = 0.30
+INPUT_PRICE_PER_M  = 0.10
+OUTPUT_PRICE_PER_M = 0.50
 
 SYSTEM_PROMPT = (
     "You are a legal contract analysis assistant.  Answer the user's "
@@ -105,23 +99,25 @@ def run_workflow(question: str) -> dict:
 
     prompt = f"{SYSTEM_PROMPT}\n\nGATHERED CONTEXT:\n{context}\n\nUSER QUESTION:\n{question}"
 
-    client   = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-    response = gemini_call_with_retry(client, model=MODEL, contents=prompt)
+    client   = get_client()
+    response = groq_call_with_retry(
+        client, model=MODEL, messages=[{"role": "user", "content": prompt}],
+    )
 
     elapsed = time.time() - start
 
     # Token bookkeeping
     i_tok = o_tok = 0
-    if hasattr(response, "usage_metadata") and response.usage_metadata:
-        i_tok = response.usage_metadata.prompt_token_count or 0
-        o_tok = response.usage_metadata.candidates_token_count or 0
+    if getattr(response, "usage", None):
+        i_tok = response.usage.prompt_tokens or 0
+        o_tok = response.usage.completion_tokens or 0
 
     total_tok = i_tok + o_tok
     cost = (i_tok * INPUT_PRICE_PER_M / 1_000_000
             + o_tok * OUTPUT_PRICE_PER_M / 1_000_000)
 
     return {
-        "answer":              response.text,
+        "answer":              response.choices[0].message.content,
         "tools_called": [
             {"name": "search_clause",
              "args": {"clause_name": clause_kw}},
