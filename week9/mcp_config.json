@@ -1,0 +1,14 @@
+{
+  "servers": [
+    {
+      "name": "clause_search",
+      "command": "python",
+      "args": ["-m", "week9.servers.clause_server"]
+    },
+    {
+      "name": "contract_repository",
+      "command": "python",
+      "args": ["-m", "week9.servers.contract_repo_server"]
+    }
+  ]
+}

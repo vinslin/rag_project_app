@@ -1,0 +1,196 @@
+[
+  {
+    "direction": "client->server",
+    "raw": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2024-11-05",
+        "capabilities": {},
+        "clientInfo": {
+          "name": "week9-wire-capture",
+          "version": "0.1"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server->client",
+    "raw": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": "2024-11-05",
+        "capabilities": {
+          "experimental": {},
+          "prompts": {
+            "listChanged": false
+          },
+          "resources": {
+            "subscribe": false,
+            "listChanged": false
+          },
+          "tools": {
+            "listChanged": false
+          }
+        },
+        "serverInfo": {
+          "name": "contract_repository",
+          "version": "1.30.0"
+        }
+      }
+    }
+  },
+  {
+    "direction": "client->server",
+    "raw": {
+      "jsonrpc": "2.0",
+      "method": "notifications/initialized",
+      "params": {}
+    }
+  },
+  {
+    "direction": "client->server",
+    "raw": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "tools/list",
+      "params": {}
+    }
+  },
+  {
+    "direction": "server->client",
+    "raw": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "tools": [
+          {
+            "name": "lookup_contract",
+            "description": "Look up a contract's basic metadata (title, parties, effective date)\n    by its repository contract_id (e.g. 'MSA-2026-014').\n\n    If the contract_id is not found, the result lists every contract_id\n    that DOES exist in the repository, so the caller can retry with a\n    valid id instead of assuming the repository is down.\n    ",
+            "inputSchema": {
+              "properties": {
+                "contract_id": {
+                  "title": "Contract Id",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "contract_id"
+              ],
+              "title": "lookup_contractArguments",
+              "type": "object"
+            },
+            "outputSchema": {
+              "properties": {
+                "result": {
+                  "title": "Result",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "result"
+              ],
+              "title": "lookup_contractOutput",
+              "type": "object"
+            }
+          },
+          {
+            "name": "get_contract_effective_date",
+            "description": "Return the effective date for a contract_id from the repository's\n    own record (independent of week7's version-key based lookup).\n\n    If the contract_id is not found, says so explicitly and lists the\n    valid ids -- distinct from the case where the id is valid but a\n    requested amendment doesn't exist yet (see get_amendment_chain).\n    ",
+            "inputSchema": {
+              "properties": {
+                "contract_id": {
+                  "title": "Contract Id",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "contract_id"
+              ],
+              "title": "get_contract_effective_dateArguments",
+              "type": "object"
+            },
+            "outputSchema": {
+              "properties": {
+                "result": {
+                  "title": "Result",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "result"
+              ],
+              "title": "get_contract_effective_dateOutput",
+              "type": "object"
+            }
+          },
+          {
+            "name": "get_amendment_chain",
+            "description": "Return the ordered chain of amendments on file for a contract_id,\n    each with its id, title, effective date, and a one-line summary of\n    what it changed.\n\n    If the contract_id is unknown, lists valid ids. If the contract_id is\n    valid but has zero amendments on file, says so explicitly rather than\n    returning an empty/ambiguous result -- so the model can distinguish\n    \"no amendments exist\" from \"lookup failed\".\n    ",
+            "inputSchema": {
+              "properties": {
+                "contract_id": {
+                  "title": "Contract Id",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "contract_id"
+              ],
+              "title": "get_amendment_chainArguments",
+              "type": "object"
+            },
+            "outputSchema": {
+              "properties": {
+                "result": {
+                  "title": "Result",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "result"
+              ],
+              "title": "get_amendment_chainOutput",
+              "type": "object"
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "direction": "client->server",
+    "raw": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "tools/call",
+      "params": {
+        "name": "lookup_contract",
+        "arguments": {
+          "contract_id": "MSA-2026-014"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server->client",
+    "raw": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Contract ID: MSA-2026-014\nTitle: Master Service Agreement MSA-2026-014\nParties: Northstar Technologies Pvt. Ltd., Meridian Software Services Pvt. Ltd.\nEffective Date: 2026-01-01\nAmendments on file: 2"
+          }
+        ],
+        "structuredContent": {
+          "result": "Contract ID: MSA-2026-014\nTitle: Master Service Agreement MSA-2026-014\nParties: Northstar Technologies Pvt. Ltd., Meridian Software Services Pvt. Ltd.\nEffective Date: 2026-01-01\nAmendments on file: 2"
+        },
+        "isError": false
+      }
+    }
+  }
+]
