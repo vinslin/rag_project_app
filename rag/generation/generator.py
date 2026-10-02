@@ -91,7 +91,8 @@ class GeminiGenerator:
                  mmr_k=config.MMR_K,
                  mmr_lambda=config.MMR_LAMBDA,
                  final_k=config.FINAL_K,
-                 search_mode=config.SEARCH_MODE):
+                 search_mode=config.SEARCH_MODE,
+                 conversation_history=None):
         """Retrieve, rerank, and generate an answer.
 
         Pipeline: Retrieval (retrieval_k) → MMR (mmr_k diverse) → Cross-Encoder (final_k) → LLM
@@ -209,9 +210,12 @@ USER QUESTION:
 {query}
 """
 
+        messages = list(conversation_history or [])
+        messages.append({"role": "user", "content": prompt})
+
         response = groq_call_with_retry(
             client, model=self.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
         )
 
         n_rrf = len(results.get("documents", [[]])[0])
