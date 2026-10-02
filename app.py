@@ -8,6 +8,7 @@ from rag.ingestion.chunker import chunk_document
 from rag.retrieval.vector_store import build_index, clear_index
 from rag.pipeline import answer_question
 from rag import config
+from router.agent import route as router_route
 
 CHAT_HISTORY_PATH = "data/chat_history.json"
 
@@ -55,6 +56,45 @@ _ORIGIN_BADGE = {
     "both": "🔀 Both",
     "hybrid": "🔀 Hybrid",
 }
+
+
+_ROUTE_BADGE = {
+    "rag":  ("🗂️ RAG", "#1f77b4"),
+    "mcp":  ("🔌 MCP Standards", "#2ca02c"),
+    "both": ("⚖️ RAG + MCP", "#9467bd"),
+}
+
+
+def _render_route_badge(response: dict) -> None:
+    route = response.get("route")
+    if not route:
+        return
+    label, color = _ROUTE_BADGE.get(route, (route, "#888"))
+    reason = response.get("route_reason", "")
+    st.markdown(
+        f'<span style="background:{color};color:white;padding:2px 10px;'
+        f'border-radius:12px;font-size:0.78em;font-weight:600">{label}</span>'
+        + (f'&nbsp;&nbsp;<span style="color:#888;font-size:0.78em">{reason}</span>' if reason else ""),
+        unsafe_allow_html=True,
+    )
+
+
+def _render_mcp_tools(response: dict) -> None:
+    tools = response.get("mcp_tools_called", [])
+    if not tools:
+        return
+    with st.expander(f"🔌 MCP tools called ({len(tools)})", expanded=False):
+        for i, tool in enumerate(tools, 1):
+            name = tool.get("name", "?") if isinstance(tool, dict) else tool.name
+            args = tool.get("args", {}) if isinstance(tool, dict) else tool.args
+            preview = tool.get("result_preview", "") if isinstance(tool, dict) else tool.result_preview
+            st.markdown(f"**{i}. `{name}`**")
+            if args:
+                st.json(args)
+            if preview:
+                st.caption(f"Result preview: {preview[:200]}")
+            if i < len(tools):
+                st.divider()
 
 
 def _render_sources(response: dict) -> None:
@@ -166,6 +206,18 @@ with st.sidebar:
     final_k     = st.slider("Final K (after reranking)", 1, 10,  config.FINAL_K)
 
     st.divider()
+    st.subheader("🤖 Router Agent")
+    use_router = st.toggle(
+        "Enable Router Agent (RAG + MCP)",
+        value=True,
+        help=(
+            "When ON, the router classifies each query and answers from "
+            "contract documents (RAG), company standards (MCP), or both. "
+            "When OFF, only the RAG pipeline is used."
+        ),
+    )
+
+    st.divider()
     col_build, col_clear = st.columns(2)
     with col_build:
         build_button = st.button("🔨 Build Index", use_container_width=True)
@@ -241,9 +293,12 @@ if not st.session_state.messages:
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        # Attach sources expander to assistant messages that have debug data
+        # Attach route badge, MCP tools, and sources to assistant messages with debug data
         if msg["role"] == "assistant" and i in st.session_state.debug_data:
-            _render_sources(st.session_state.debug_data[i])
+            debug = st.session_state.debug_data[i]
+            _render_route_badge(debug)
+            _render_mcp_tools(debug)
+            _render_sources(debug)
 
 
 # ── Chat input ────────────────────────────────────────────────────────────
@@ -272,28 +327,35 @@ if prompt := st.chat_input("Ask about your contracts…"):
                 and not m["content"].startswith("✅")
             ]
 
-            with st.spinner("Thinking…"):
-                response = answer_question(
-                    prompt,
-                    search_mode=search_mode,
-                    conversation_history=llm_history,
-                    retrieval_k=retrieval_k,
-                    mmr_k=mmr_k,
-                    mmr_lambda=mmr_lambda,
-                    final_k=final_k,
-                )
+            rag_kwargs = dict(
+                search_mode=search_mode,
+                conversation_history=llm_history,
+                retrieval_k=retrieval_k,
+                mmr_k=mmr_k,
+                mmr_lambda=mmr_lambda,
+                final_k=final_k,
+            )
 
-            if response["out_of_scope"]:
+            with st.spinner("Thinking…"):
+                if use_router:
+                    result = router_route(prompt, **rag_kwargs)
+                    response = result.to_dict() if hasattr(result, "to_dict") else result
+                else:
+                    response = answer_question(prompt, **rag_kwargs)
+
+            if response.get("out_of_scope"):
                 reply = f"🛡️ {response['answer']}"
                 st.markdown(reply)
-                st.caption(f"Reason: {response['reasoning']}")
+                st.caption(f"Reason: {response.get('reasoning', '')}")
             else:
                 reply = response["answer"]
+                _render_route_badge(response)
                 st.markdown(reply)
 
                 # Store debug keyed by the index this message will occupy
                 next_idx = len(st.session_state.messages)
                 st.session_state.debug_data[next_idx] = response
+                _render_mcp_tools(response)
                 _render_sources(response)
 
             st.session_state.messages.append({"role": "assistant", "content": reply})
