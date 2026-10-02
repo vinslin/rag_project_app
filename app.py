@@ -41,7 +41,7 @@ def _save_history(messages: list) -> None:
 # ── Session state init ────────────────────────────────────────────────────
 
 if "messages" not in st.session_state:
-    st.session_state.messages = _load_history()
+    st.session_state.messages = []
 if "debug_data" not in st.session_state:
     # maps message-list index → response dict (for sources/debug expanders)
     st.session_state.debug_data = {}
@@ -173,7 +173,6 @@ with st.sidebar:
         if st.button("🗑️ Clear Chat", use_container_width=True):
             st.session_state.messages   = []
             st.session_state.debug_data = {}
-            _save_history([])
             st.rerun()
 
     if st.session_state.get("indexed"):
@@ -222,7 +221,6 @@ if build_button:
             ),
         }
         st.session_state.messages.append(notify)
-        _save_history(st.session_state.messages)
         st.rerun()
 
 
@@ -300,4 +298,3 @@ if prompt := st.chat_input("Ask about your contracts…"):
 
             st.session_state.messages.append({"role": "assistant", "content": reply})
 
-    _save_history(st.session_state.messages)
