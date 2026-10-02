@@ -1,20 +1,28 @@
-import os
-from google import genai
-from dotenv import load_dotenv
+from __future__ import annotations
 
-load_dotenv()
+import threading
 
-API_KEY = os.getenv("GOOGLE_API_KEY")
+from sentence_transformers import SentenceTransformer
 
-client = genai.Client(api_key=API_KEY)
+_MODEL_NAME = "BAAI/bge-base-en-v1.5"
+_model: SentenceTransformer | None = None
+_lock = threading.Lock()
 
 
-def create_embedding(text):
-    """Generate dense embeddings using Gemini embedding model."""
+def _get_model() -> SentenceTransformer:
+    global _model
+    if _model is None:
+        with _lock:
+            if _model is None:
+                _model = SentenceTransformer(_MODEL_NAME)
+    return _model
 
-    result = client.models.embed_content(
-        model="gemini-embedding-001",
-        contents=text
-    )
 
-    return result.embeddings[0].values
+def create_embedding(text: str) -> list[float]:
+    """Generate dense embeddings using the local BGE-base-en-v1.5 model.
+
+    Returns a 768-dimensional normalized float list.
+    """
+    model = _get_model()
+    vector = model.encode(text, normalize_embeddings=True)
+    return vector.tolist()

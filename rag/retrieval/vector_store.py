@@ -7,14 +7,17 @@ chroma_client = chromadb.PersistentClient(path="./data/chroma")
 
 
 def clear_index(collection_name):
-    """Clear an existing ChromaDB collection and the BM25 corpus.
+    """Delete and recreate a ChromaDB collection, then clear the BM25 corpus.
 
+    Deleting the collection (rather than just its documents) resets the
+    embedded dimension so a new embedding model can be used immediately.
     Call this ONCE before indexing new documents, not per-page.
     """
-    collection = chroma_client.get_or_create_collection(name=collection_name)
-    existing = collection.get()
-    if existing["ids"]:
-        collection.delete(ids=existing["ids"])
+    try:
+        chroma_client.delete_collection(name=collection_name)
+    except Exception:
+        pass  # collection may not exist yet — that's fine
+    chroma_client.get_or_create_collection(name=collection_name)
     clear_corpus()
 
 
