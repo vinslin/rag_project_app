@@ -46,6 +46,9 @@ if "messages" not in st.session_state:
 if "debug_data" not in st.session_state:
     # maps message-list index → response dict (for sources/debug expanders)
     st.session_state.debug_data = {}
+if "full_doc_texts" not in st.session_state:
+    # maps filename → full document text; populated at index-build time
+    st.session_state.full_doc_texts = {}
 
 
 # ── Debug renderer (sources tabs) ─────────────────────────────────────────
@@ -59,9 +62,11 @@ _ORIGIN_BADGE = {
 
 
 _ROUTE_BADGE = {
-    "rag":  ("🗂️ RAG", "#1f77b4"),
-    "mcp":  ("🔌 MCP Standards", "#2ca02c"),
-    "both": ("⚖️ RAG + MCP", "#9467bd"),
+    "rag":          ("🗂️ RAG",                 "#1f77b4"),
+    "mcp":          ("🔌 MCP Standards",        "#2ca02c"),
+    "both":         ("⚖️ RAG + MCP",            "#9467bd"),
+    "full_doc":     ("📄 Full Document",         "#e87722"),
+    "full_doc_mcp": ("📋 Full Compliance Review","#d62728"),
 }
 
 
@@ -95,6 +100,18 @@ def _render_mcp_tools(response: dict) -> None:
                 st.caption(f"Result preview: {preview[:200]}")
             if i < len(tools):
                 st.divider()
+
+
+def _render_full_doc_info(response: dict) -> None:
+    """Show document metadata for full_doc and full_doc_mcp routes."""
+    filenames = response.get("doc_filenames", [])
+    tokens = response.get("doc_token_estimate", 0)
+    if not filenames:
+        return
+    with st.expander("📄 Document analysed", expanded=False):
+        st.caption(f"~{tokens:,} estimated tokens")
+        for f in filenames:
+            st.markdown(f"- `{f}`")
 
 
 def _render_sources(response: dict) -> None:
@@ -242,6 +259,7 @@ if build_button:
         with st.sidebar, st.spinner("Building index…"):
             all_chunks = []
             clear_index(config.COLLECTION_NAME)
+            st.session_state.full_doc_texts = {}   # reset on each new build
 
             for uploaded_file in uploaded_files:
                 os.makedirs("documents", exist_ok=True)
@@ -250,6 +268,11 @@ if build_button:
                     f.write(uploaded_file.getbuffer())
 
                 pages = load_pdf(path)
+
+                # Store full document text for full-doc router routes
+                full_text = "\n\n".join(p["text"] for p in pages)
+                st.session_state.full_doc_texts[uploaded_file.name] = full_text
+
                 for page in pages:
                     chunks = chunk_document(page["text"], chunk_size, overlap)
                     build_index(
@@ -298,6 +321,7 @@ for i, msg in enumerate(st.session_state.messages):
             debug = st.session_state.debug_data[i]
             _render_route_badge(debug)
             _render_mcp_tools(debug)
+            _render_full_doc_info(debug)
             _render_sources(debug)
 
 
@@ -338,7 +362,11 @@ if prompt := st.chat_input("Ask about your contracts…"):
 
             with st.spinner("Thinking…"):
                 if use_router:
-                    result = router_route(prompt, **rag_kwargs)
+                    result = router_route(
+                        prompt,
+                        full_doc_texts=st.session_state.get("full_doc_texts") or None,
+                        **rag_kwargs,
+                    )
                     response = result.to_dict() if hasattr(result, "to_dict") else result
                 else:
                     response = answer_question(prompt, **rag_kwargs)
@@ -356,6 +384,7 @@ if prompt := st.chat_input("Ask about your contracts…"):
                 next_idx = len(st.session_state.messages)
                 st.session_state.debug_data[next_idx] = response
                 _render_mcp_tools(response)
+                _render_full_doc_info(response)
                 _render_sources(response)
 
             st.session_state.messages.append({"role": "assistant", "content": reply})

@@ -238,13 +238,46 @@ class MCPHttpClient:
         logger.info("Discovered %d tools from MCP server", len(tools))
         return tools
 
+    # Fields Groq/OpenAI function-calling accepts at the property level.
+    # "default" is NOT in this set — Groq rejects it and returns a 400.
+    _ALLOWED_PROP_KEYS = frozenset({
+        "type", "description", "enum", "items", "properties",
+        "required", "anyOf", "oneOf", "allOf",
+    })
+
+    @classmethod
+    def _sanitize_schema(cls, schema: dict | None) -> dict:
+        """Strip fields Groq doesn't accept from an MCP inputSchema.
+
+        Groq follows a strict subset of JSON Schema. In particular it rejects:
+        - ``default`` on individual properties  (causes output_parse_failed)
+        - ``$schema`` / ``$id`` at the top level
+        Any field not in _ALLOWED_PROP_KEYS is dropped from each property.
+        """
+        if not isinstance(schema, dict):
+            return {"type": "object", "properties": {}}
+
+        sanitized: dict = {"type": schema.get("type", "object")}
+
+        raw_props: dict = schema.get("properties") or {}
+        sanitized["properties"] = {
+            k: {pk: pv for pk, pv in v.items() if pk in cls._ALLOWED_PROP_KEYS}
+            for k, v in raw_props.items()
+            if isinstance(v, dict)
+        }
+
+        if "required" in schema:
+            sanitized["required"] = schema["required"]
+
+        return sanitized
+
     def to_groq_tools(self) -> list[dict]:
         """Discover tools from the server and convert them to Groq/OpenAI
         function-calling format so the agent can use them without any
         hardcoded tool definitions.
 
-        MCP's inputSchema is already valid JSON Schema, so no field
-        conversion is needed.
+        MCP inputSchema is sanitized to remove fields Groq does not accept
+        (notably ``default`` on properties, which triggers a 400 parse error).
         """
         groq_tools = []
         for tool in self.list_tools():
@@ -253,10 +286,7 @@ class MCPHttpClient:
                 "function": {
                     "name": tool["name"],
                     "description": tool.get("description", ""),
-                    "parameters": tool.get("inputSchema") or {
-                        "type": "object",
-                        "properties": {},
-                    },
+                    "parameters": self._sanitize_schema(tool.get("inputSchema")),
                 },
             })
         return groq_tools

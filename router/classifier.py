@@ -1,9 +1,11 @@
 """LLM-based query classifier.
 
 Determines which data source(s) should answer a user query:
-  - "rag"  : content from uploaded contract documents
-  - "mcp"  : company contract standards from the MCP server
-  - "both" : compliance check — compare documents against standards
+  - "rag"          : specific content from uploaded contract documents (chunks)
+  - "mcp"          : company contract standards from the MCP server
+  - "both"         : validate a specific clause/section against standards
+  - "full_doc"     : read and analyse the whole document (no MCP needed)
+  - "full_doc_mcp" : compare the whole document against all MCP standards
 """
 
 from __future__ import annotations
@@ -25,9 +27,11 @@ logger = logging.getLogger(__name__)
 
 
 class Route(str, Enum):
-    RAG = "rag"
-    MCP = "mcp"
-    BOTH = "both"
+    RAG          = "rag"
+    MCP          = "mcp"
+    BOTH         = "both"
+    FULL_DOC     = "full_doc"
+    FULL_DOC_MCP = "full_doc_mcp"
 
 
 @dataclass(frozen=True)
@@ -38,28 +42,58 @@ class Classification:
 
 
 _CLASSIFY_SYSTEM = """\
-You are a query classifier for a legal contract analysis system that has two data sources:
+You are a query classifier for a legal contract analysis system with these data sources:
 
-1. RAG (document search): Searches through uploaded contract PDF documents to find specific content,
-   clauses, terms, dates, parties, and language written in those documents.
+1. RAG (chunk search): Retrieves specific passages from uploaded contract PDFs.
+2. MCP (standards server): Holds company-approved contract standards — active template,
+   required sections, mandatory clauses, and per-clause requirements.
+3. FULL_DOC: Loads the entire contract document text (not just chunks).
 
-2. MCP (standards server): A server that holds the company's approved contract standards —
-   the active template version, required document sections, mandatory clauses, and
-   detailed requirements for each clause.
+Classify into exactly ONE route:
 
-Classify the user query into exactly ONE of these routes:
-- "rag"  : The query asks about specific content, language, or details found inside uploaded contracts
-- "mcp"  : The query asks about company standards, required clauses, active template, or compliance rules
-- "both" : The query asks to validate or compare an uploaded contract against company standards
+- "rag"
+  The user asks about specific content, a named clause, a date, a party name,
+  or any detail that can be answered from a few paragraphs of the document.
+  Examples: "What is the payment term?", "Who are the parties?",
+            "What does clause 8.2 say?"
+
+- "mcp"
+  The user asks about company standards, what the active template requires,
+  which clauses are mandatory, or what a clause must contain per company policy.
+  Examples: "What clauses are required?", "What is the active template version?",
+            "What must the confidentiality clause include?"
+
+- "both"
+  The user asks whether a specific clause or section in their contract meets
+  company standards — a targeted clause-level compliance check.
+  Examples: "Is our termination clause compliant?",
+            "Does section 6 meet the confidentiality requirements?"
+
+- "full_doc"
+  The user wants a broad analysis, summary, or overview of the whole document
+  without comparing it against company standards.
+  Examples: "Summarise this contract", "Give me an overview of the agreement",
+            "What are the key points of this contract?",
+            "Explain the entire document to me"
+
+- "full_doc_mcp"
+  The user wants to compare or validate the ENTIRE contract against the company
+  template or all company standards — a full document-level compliance review.
+  Examples: "Compare this contract with the active template",
+            "Does this contract meet all company requirements?",
+            "Full compliance review of this document",
+            "Validate the entire contract against company standards",
+            "Check all clauses against the template",
+            "Is this contract compliant with our template?"
 
 Rules:
-- If the user asks "what does the contract say about X" → rag
-- If the user asks "what clauses are required" or "what must a contract include" → mcp
-- If the user asks "is my contract compliant" or "does it have all required clauses" → both
-- When uncertain, prefer "both" over "rag" alone
+- Specific question about one clause → "both" (not "full_doc_mcp")
+- Whole document summary with NO mention of standards → "full_doc"
+- Any comparison with template / company standards across the whole document → "full_doc_mcp"
+- When uncertain between "both" and "full_doc_mcp", pick "full_doc_mcp"
 
-Respond with ONLY a valid JSON object (no markdown, no explanation):
-{"route": "rag" | "mcp" | "both", "reason": "<one concise sentence>"}
+Respond with ONLY a valid JSON object — no markdown, no explanation:
+{"route": "rag"|"mcp"|"both"|"full_doc"|"full_doc_mcp", "reason": "<one concise sentence>"}
 """
 
 
@@ -97,10 +131,11 @@ class QueryClassifier:
                     logger.error("Classifier LLM call failed: %s", exc)
                     break
                 wait = 5.0 * (2 ** (attempt - 1))
-                logger.warning("Classifier retry %d/%d in %.1fs", attempt, self._max_retries, wait)
+                logger.warning(
+                    "Classifier retry %d/%d in %.1fs", attempt, self._max_retries, wait
+                )
                 time.sleep(wait)
 
-        # Safe fallback
         return Classification(
             route=Route.RAG,
             reason="Classifier unavailable — defaulting to RAG.",
@@ -109,7 +144,6 @@ class QueryClassifier:
 
     @staticmethod
     def _parse(raw: str, query: str) -> Classification:
-        # Strip markdown code fences if the model added them
         text = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
         try:
             data = json.loads(text)
@@ -119,7 +153,9 @@ class QueryClassifier:
             logger.debug("Classified %r → %s (%s)", query[:60], route, reason)
             return Classification(route=route, reason=reason, raw_response=raw)
         except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning("Classifier parse error (%s) for raw=%r — defaulting to RAG", exc, raw)
+            logger.warning(
+                "Classifier parse error (%s) for raw=%r — defaulting to RAG", exc, raw
+            )
             return Classification(
                 route=Route.RAG,
                 reason="Parse error in classification — defaulted to RAG.",
