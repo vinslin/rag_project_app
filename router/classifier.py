@@ -20,7 +20,7 @@ from enum import Enum
 from groq import Groq
 from dotenv import load_dotenv
 
-from rag import config
+from core import config
 
 load_dotenv()
 logger = logging.getLogger(__name__)

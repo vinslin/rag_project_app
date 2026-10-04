@@ -25,10 +25,10 @@ from typing import Any
 from groq import Groq
 from dotenv import load_dotenv
 
-from rag import config
-from rag.pipeline import answer_question
+from core import config
+from pipeline.rag import answer_question
 from router.classifier import QueryClassifier, Route
-from router.mcp_http_client import MCPHttpClient
+from mcp.client import MCPHttpClient
 from router.doc_loader import load_full_text, DocumentLoadError
 
 load_dotenv()

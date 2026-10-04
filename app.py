@@ -1,16 +1,15 @@
 import os
-import json
 
 import streamlit as st
 
-from rag.ingestion.pdf_loader import load_pdf
-from rag.ingestion.chunker import chunk_document
-from rag.retrieval.vector_store import build_index, clear_index
-from rag.pipeline import answer_question
-from rag import config
+from core import config
+from ingestion.pdf_loader import load_pdf
+from ingestion.chunker import chunk_document
+from retrieval.vector_store import build_index, clear_index
+from pipeline.rag import answer_question
 from router.agent import route as router_route
-
-CHAT_HISTORY_PATH = "data/chat_history.json"
+from ui.history import load_history, save_history
+from ui.renderers import render_route_badge, render_mcp_tools, render_full_doc_info, render_sources
 
 st.set_page_config(
     page_title="Legal Contract Intelligence",
@@ -18,177 +17,16 @@ st.set_page_config(
     layout="wide",
 )
 
-# ── Persistence helpers ───────────────────────────────────────────────────
-
-def _load_history() -> list:
-    try:
-        if os.path.exists(CHAT_HISTORY_PATH):
-            with open(CHAT_HISTORY_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return []
-
-
-def _save_history(messages: list) -> None:
-    os.makedirs("data", exist_ok=True)
-    try:
-        with open(CHAT_HISTORY_PATH, "w", encoding="utf-8") as f:
-            json.dump(messages, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
-
-
-# ── Session state init ────────────────────────────────────────────────────
+# ── Session state ─────────────────────────────────────────────────────────────
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "debug_data" not in st.session_state:
-    # maps message-list index → response dict (for sources/debug expanders)
     st.session_state.debug_data = {}
 if "full_doc_texts" not in st.session_state:
-    # maps filename → full document text; populated at index-build time
     st.session_state.full_doc_texts = {}
 
-
-# ── Debug renderer (sources tabs) ─────────────────────────────────────────
-
-_ORIGIN_BADGE = {
-    "vector": "🧠 Semantic",
-    "bm25": "🔤 BM25",
-    "both": "🔀 Both",
-    "hybrid": "🔀 Hybrid",
-}
-
-
-_ROUTE_BADGE = {
-    "rag":          ("🗂️ RAG",                 "#1f77b4"),
-    "mcp":          ("🔌 MCP Standards",        "#2ca02c"),
-    "both":         ("⚖️ RAG + MCP",            "#9467bd"),
-    "full_doc":     ("📄 Full Document",         "#e87722"),
-    "full_doc_mcp": ("📋 Full Compliance Review","#d62728"),
-}
-
-
-def _render_route_badge(response: dict) -> None:
-    route = response.get("route")
-    if not route:
-        return
-    label, color = _ROUTE_BADGE.get(route, (route, "#888"))
-    reason = response.get("route_reason", "")
-    st.markdown(
-        f'<span style="background:{color};color:white;padding:2px 10px;'
-        f'border-radius:12px;font-size:0.78em;font-weight:600">{label}</span>'
-        + (f'&nbsp;&nbsp;<span style="color:#888;font-size:0.78em">{reason}</span>' if reason else ""),
-        unsafe_allow_html=True,
-    )
-
-
-def _render_mcp_tools(response: dict) -> None:
-    tools = response.get("mcp_tools_called", [])
-    if not tools:
-        return
-    with st.expander(f"🔌 MCP tools called ({len(tools)})", expanded=False):
-        for i, tool in enumerate(tools, 1):
-            name = tool.get("name", "?") if isinstance(tool, dict) else tool.name
-            args = tool.get("args", {}) if isinstance(tool, dict) else tool.args
-            preview = tool.get("result_preview", "") if isinstance(tool, dict) else tool.result_preview
-            st.markdown(f"**{i}. `{name}`**")
-            if args:
-                st.json(args)
-            if preview:
-                st.caption(f"Result preview: {preview[:200]}")
-            if i < len(tools):
-                st.divider()
-
-
-def _render_full_doc_info(response: dict) -> None:
-    """Show document metadata for full_doc and full_doc_mcp routes."""
-    filenames = response.get("doc_filenames", [])
-    tokens = response.get("doc_token_estimate", 0)
-    if not filenames:
-        return
-    with st.expander("📄 Document analysed", expanded=False):
-        st.caption(f"~{tokens:,} estimated tokens")
-        for f in filenames:
-            st.markdown(f"- `{f}`")
-
-
-def _render_sources(response: dict) -> None:
-    """Render retrieval debug tabs inside a collapsed expander."""
-    vector_chunks = response.get("vector_chunks", [])
-    bm25_chunks   = response.get("bm25_chunks", [])
-    mmr_chunks    = response.get("mmr_chunks", [])
-    final_sources = response.get("sources", [])
-
-    if not (vector_chunks or bm25_chunks or mmr_chunks or final_sources):
-        return
-
-    with st.expander("📚 Sources & retrieval debug", expanded=False):
-        st.caption(response.get("reasoning", ""))
-
-        tab_labels, tab_data = [], []
-        if vector_chunks:
-            tab_labels.append(f"🧠 Semantic ({len(vector_chunks)})")
-            tab_data.append(("vector", vector_chunks))
-        if bm25_chunks:
-            tab_labels.append(f"🔤 BM25 ({len(bm25_chunks)})")
-            tab_data.append(("bm25", bm25_chunks))
-        if mmr_chunks:
-            tab_labels.append(f"🎯 MMR ({len(mmr_chunks)})")
-            tab_data.append(("mmr", mmr_chunks))
-        tab_labels.append(f"✅ Reranked ({len(final_sources)})")
-        tab_data.append(("final", final_sources))
-
-        tabs = st.tabs(tab_labels)
-        for tab, (tab_type, chunks) in zip(tabs, tab_data):
-            with tab:
-                if tab_type == "final":
-                    for i, src in enumerate(chunks):
-                        badge = _ORIGIN_BADGE.get(src.get("retrieved_by", ""), "")
-                        label = (
-                            f"#{i+1} {badge} — {src['source']} — Page {src['page']}"
-                            + (f" — §{src['heading']}" if src.get("heading") else "")
-                        )
-                        with st.expander(label, expanded=(i == 0)):
-                            parts = [f"**Distance:** `{src['distance']}`"]
-                            if src.get("rrf_score") is not None:
-                                parts.append(f"**RRF:** `{src['rrf_score']}`")
-                            if src.get("mmr_score") is not None:
-                                parts.append(f"**MMR:** `{src['mmr_score']}`")
-                            if src.get("rerank_score") is not None:
-                                parts.append(f"**Rerank:** `{src['rerank_score']}`")
-                            st.caption(" · ".join(parts))
-                            st.markdown("---")
-                            st.markdown(src.get("text", ""))
-
-                elif tab_type == "mmr":
-                    for chunk in chunks:
-                        badge = _ORIGIN_BADGE.get(chunk.get("origin", ""), "")
-                        label = (
-                            f"Rank {chunk['rank']} {badge} — {chunk['source']} — Page {chunk['page']}"
-                            + (f" — §{chunk['heading']}" if chunk.get("heading") else "")
-                        )
-                        with st.expander(label, expanded=(chunk["rank"] == 1)):
-                            if chunk.get("mmr_score") is not None:
-                                st.caption(f"**MMR Score:** `{chunk['mmr_score']}`")
-                            st.markdown("---")
-                            st.markdown(chunk["text"])
-
-                else:
-                    score_label = "Distance" if tab_type == "vector" else "BM25 Score"
-                    for chunk in chunks:
-                        label = (
-                            f"Rank {chunk['rank']} — {chunk['source']} — Page {chunk['page']}"
-                            + (f" — §{chunk['heading']}" if chunk.get("heading") else "")
-                        )
-                        with st.expander(label, expanded=(chunk["rank"] == 1)):
-                            st.caption(f"**{score_label}:** `{chunk['score']}`")
-                            st.markdown("---")
-                            st.markdown(chunk["text"])
-
-
-# ── Sidebar ───────────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.header("⚖️ Legal Contract Intelligence")
@@ -247,8 +85,7 @@ with st.sidebar:
     if st.session_state.get("indexed"):
         st.success(f"✅ {st.session_state.chunk_count} chunks indexed")
 
-
-# ── Index building ────────────────────────────────────────────────────────
+# ── Index building ────────────────────────────────────────────────────────────
 
 if build_button:
     if not uploaded_files:
@@ -259,7 +96,7 @@ if build_button:
         with st.sidebar, st.spinner("Building index…"):
             all_chunks = []
             clear_index(config.COLLECTION_NAME)
-            st.session_state.full_doc_texts = {}   # reset on each new build
+            st.session_state.full_doc_texts = {}
 
             for uploaded_file in uploaded_files:
                 os.makedirs("documents", exist_ok=True)
@@ -268,42 +105,33 @@ if build_button:
                     f.write(uploaded_file.getbuffer())
 
                 pages = load_pdf(path)
-
-                # Store full document text for full-doc router routes
-                full_text = "\n\n".join(p["text"] for p in pages)
-                st.session_state.full_doc_texts[uploaded_file.name] = full_text
+                st.session_state.full_doc_texts[uploaded_file.name] = "\n\n".join(
+                    p["text"] for p in pages
+                )
 
                 for page in pages:
                     chunks = chunk_document(page["text"], chunk_size, overlap)
-                    build_index(
-                        chunks,
-                        config.COLLECTION_NAME,
-                        source=page["source"],
-                        page=page["page"],
-                    )
+                    build_index(chunks, config.COLLECTION_NAME, source=page["source"], page=page["page"])
                     all_chunks.extend(chunks)
 
             st.session_state.collection_name = config.COLLECTION_NAME
             st.session_state.indexed         = True
             st.session_state.chunk_count     = len(all_chunks)
 
-        notify = {
+        st.session_state.messages.append({
             "role": "assistant",
             "content": (
                 f"✅ Indexed **{len(all_chunks)} chunks** from "
                 f"**{len(uploaded_files)} file(s)**. "
                 "You can now ask me questions about your contracts."
             ),
-        }
-        st.session_state.messages.append(notify)
+        })
         st.rerun()
 
-
-# ── Chat area ─────────────────────────────────────────────────────────────
+# ── Chat area ─────────────────────────────────────────────────────────────────
 
 st.title("⚖️ Legal Contract Intelligence")
 
-# Greeting shown only when there is no history at all
 if not st.session_state.messages:
     with st.chat_message("assistant"):
         st.markdown(
@@ -312,24 +140,19 @@ if not st.session_state.messages:
             "then ask me anything — clauses, amendments, deadlines, defined terms, and more."
         )
 
-# Replay conversation
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        # Attach route badge, MCP tools, and sources to assistant messages with debug data
         if msg["role"] == "assistant" and i in st.session_state.debug_data:
             debug = st.session_state.debug_data[i]
-            _render_route_badge(debug)
-            _render_mcp_tools(debug)
-            _render_full_doc_info(debug)
-            _render_sources(debug)
+            render_route_badge(debug)
+            render_mcp_tools(debug)
+            render_full_doc_info(debug)
+            render_sources(debug)
 
-
-# ── Chat input ────────────────────────────────────────────────────────────
+# ── Chat input ────────────────────────────────────────────────────────────────
 
 if prompt := st.chat_input("Ask about your contracts…"):
-
-    # Show user bubble immediately
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -342,13 +165,10 @@ if prompt := st.chat_input("Ask about your contracts…"):
             )
             st.markdown(reply)
             st.session_state.messages.append({"role": "assistant", "content": reply})
-
         else:
-            # Build LLM-safe history: exclude system notifications and the current user turn
             llm_history = [
                 m for m in st.session_state.messages[:-1]
-                if m["role"] in ("user", "assistant")
-                and not m["content"].startswith("✅")
+                if m["role"] in ("user", "assistant") and not m["content"].startswith("✅")
             ]
 
             rag_kwargs = dict(
@@ -377,15 +197,12 @@ if prompt := st.chat_input("Ask about your contracts…"):
                 st.caption(f"Reason: {response.get('reasoning', '')}")
             else:
                 reply = response["answer"]
-                _render_route_badge(response)
+                render_route_badge(response)
                 st.markdown(reply)
-
-                # Store debug keyed by the index this message will occupy
                 next_idx = len(st.session_state.messages)
                 st.session_state.debug_data[next_idx] = response
-                _render_mcp_tools(response)
-                _render_full_doc_info(response)
-                _render_sources(response)
+                render_mcp_tools(response)
+                render_full_doc_info(response)
+                render_sources(response)
 
             st.session_state.messages.append({"role": "assistant", "content": reply})
-

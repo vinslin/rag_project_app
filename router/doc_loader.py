@@ -21,8 +21,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from rag import config
-from rag.retrieval.vector_store import chroma_client
+from core import config
+from retrieval.vector_store import chroma_client
 
 logger = logging.getLogger(__name__)
 
