@@ -1,0 +1,41 @@
+{
+  "trace_id": "a3f1c2d4-87b5-4e91-bc30-9f2e1a4d8c77",
+  "timestamp": "2026-10-03T11:47:22.413+00:00",
+  "prompt_version": "v1.0",
+  "route": "rag",
+  "out_of_scope": false,
+  "classifier_decision": {
+    "route": "rag",
+    "reason": "User asks about a specific clause detail answerable from document chunks."
+  },
+  "query": "According to the termination clause, what notice period must a party give to terminate for convenience?",
+  "answer": "According to Section 8.2, either party may terminate for convenience by providing sixty (60) days' written notice.",
+  "spans_ms": {
+    "retrieval":  118.4,
+    "reranking":   43.7,
+    "generation": 912.1
+  },
+  "retrieved_context_ids": [
+    "hybrid_search_legal_contract_test.pdf_p3_4",
+    "hybrid_search_legal_contract_test.pdf_p7_2",
+    "hybrid_search_legal_contract_test.pdf_p1_0"
+  ],
+  "mcp_tools_called": [],
+  "tokens": {
+    "input":  1847,
+    "output":  312,
+    "total":  2159
+  },
+  "cost_usd": {
+    "retrieval":  0.0,
+    "generation": 0.00034070,
+    "tools":      0.0,
+    "total":      0.00034070
+  },
+  "_annotation": {
+    "bug": "Model cited Section 8.2 (60 days) — the base contract clause. Amendment No. 2 Section 1 (15 days) was retrieved as chunk hybrid_search_legal_contract_test.pdf_p7_2 but ranked third. The v1.0 prompt had no rule to prefer amendments over base clauses, so the model cited the first high-scoring chunk.",
+    "fix": "Prompt v1.1 adds Rules 7 & 8 explicitly instructing the model to prefer amendment terms and cite the amendment section number.",
+    "prompt_version_at_time_of_bug": "v1.0",
+    "prompt_version_after_fix": "v1.1"
+  }
+}

@@ -11,6 +11,11 @@ Routes:
 
 MCP tool schemas are discovered dynamically from the server (tools/list)
 and cached in-process. Nothing is hardcoded here.
+
+Observability:
+    Every route call is logged to data/logs/requests.jsonl via obs.request_logger.
+    Each log record contains the route taken, classifier decision, per-span latency,
+    token counts across ALL LLM calls in the route, and the final answer text.
 """
 
 from __future__ import annotations
@@ -26,79 +31,51 @@ from groq import Groq
 from dotenv import load_dotenv
 
 from core import config
+from generation.prompts import PROMPT_VERSION
 from pipeline.rag import answer_question
 from router.classifier import QueryClassifier, Route
+from router.prompts import (
+    AGENT_PROMPT_VERSION,
+    CLASSIFIER_PROMPT_VERSION,
+    MCP_LOOP_SYSTEM,
+    CLAUSE_SYNTHESIS_SYSTEM,
+    FULL_DOC_SYSTEM,
+    FULL_DOC_MCP_SYSTEM,
+    SECTION_ANALYSIS_SYSTEM,
+    SECTION_SYNTHESIS_SYSTEM,
+)
 from mcp.client import MCPHttpClient
 from router.doc_loader import load_full_text, DocumentLoadError
+from obs.request_logger import log_request
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 MODEL = config.GENERATION_MODEL
 
-# Token threshold: documents larger than this are split section-by-section
-# rather than sent in a single prompt.
 _SINGLE_PASS_TOKEN_LIMIT = 60_000
 
 
-# ── System prompts ────────────────────────────────────────────────────────
+# ── Token accumulator ─────────────────────────────────────────────────────
 
-_MCP_LOOP_SYSTEM = (
-    "You are a legal contract standards advisor with access to the company's "
-    "contract standards database. Answer the user's question by calling the "
-    "relevant tools first, then give a precise, well-structured answer "
-    "based solely on what the tools return."
-)
+class _UsageAccum:
+    """Accumulates input/output token counts across multiple LLM calls."""
 
-_CLAUSE_SYNTHESIS_SYSTEM = (
-    "You are a legal contract compliance analyst. "
-    "You have been provided with the company's contract standards and the actual "
-    "content retrieved from the contract under review. "
-    "Produce a clear, structured compliance report: "
-    "(1) what is present and compliant, "
-    "(2) what is missing or non-compliant, "
-    "(3) a concise overall verdict."
-)
+    __slots__ = ("input_tokens", "output_tokens")
 
-_FULL_DOC_SYSTEM = (
-    "You are a senior legal analyst. You have been given the complete text of a "
-    "contract. Provide a thorough analysis covering: key parties, scope of services, "
-    "payment terms, termination conditions, confidentiality obligations, liability "
-    "provisions, governing law, and any notable or unusual clauses. "
-    "Be concise but comprehensive."
-)
+    def __init__(self) -> None:
+        self.input_tokens  = 0
+        self.output_tokens = 0
 
-_FULL_DOC_MCP_SYSTEM = (
-    "You are a senior legal contract compliance officer. "
-    "You have been given the complete text of a contract AND the company's full "
-    "contract standards (active template, required sections, required clauses, "
-    "and per-clause requirements). "
-    "Produce a structured compliance report with these exact sections:\n\n"
-    "## 1. Template & Version\n"
-    "State which template version applies and its effective date.\n\n"
-    "## 2. Document Structure\n"
-    "List each required section. Mark ✅ present / ❌ missing / ⚠️ out of order.\n\n"
-    "## 3. Required Clauses\n"
-    "For each mandatory clause code, mark ✅ found / ❌ missing.\n\n"
-    "## 4. Clause Requirement Details\n"
-    "For each clause, list its sub-requirements and mark each ✅ met / ❌ not met, "
-    "with a one-line explanation citing the contract text.\n\n"
-    "## 5. Overall Verdict\n"
-    "State COMPLIANT / PARTIALLY COMPLIANT / NON-COMPLIANT with a 2-3 sentence summary."
-)
+    def add(self, response: Any) -> None:
+        usage = getattr(response, "usage", None)
+        if usage:
+            self.input_tokens  += getattr(usage, "prompt_tokens",     0) or 0
+            self.output_tokens += getattr(usage, "completion_tokens", 0) or 0
 
-_SECTION_ANALYSIS_SYSTEM = (
-    "You are a legal contract compliance analyst reviewing one section of a contract. "
-    "Given the company standards for this section and the contract text, "
-    "state what is compliant and what is missing or non-compliant. Be concise."
-)
 
-_SECTION_SYNTHESIS_SYSTEM = (
-    "You are a legal contract compliance officer. You have received section-by-section "
-    "compliance analysis of a contract against company standards. "
-    "Synthesise these into a single, well-structured final compliance report with an "
-    "overall verdict: COMPLIANT / PARTIALLY COMPLIANT / NON-COMPLIANT."
-)
+# ── System prompts (imported from router/prompts.py) ─────────────────────
+# To change any prompt, edit router/prompts.py and bump AGENT_PROMPT_VERSION.
 
 
 # ── Result types ──────────────────────────────────────────────────────────
@@ -122,13 +99,16 @@ class RouteResult:
     out_of_scope: bool
     sources: list[dict] = field(default_factory=list)
     mcp_tools_called: list[ToolCall] = field(default_factory=list)
-    # Present only when RAG ran
     vector_chunks: list[dict] = field(default_factory=list)
     bm25_chunks: list[dict] = field(default_factory=list)
     mmr_chunks: list[dict] = field(default_factory=list)
-    # Present only when full-doc routes ran
     doc_filenames: list[str] = field(default_factory=list)
     doc_token_estimate: int = 0
+    # Observability fields — populated by each handler
+    input_tokens: int = 0
+    output_tokens: int = 0
+    spans_ms: dict = field(default_factory=dict)
+    retrieved_context_ids: list = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -163,14 +143,19 @@ def _llm_call(
     tools: list[dict] | None = None,
     max_retries: int = 4,
     base_delay: float = 5.0,
+    _acc: _UsageAccum | None = None,
 ):
+    """Call the Groq LLM with retry. Accumulates token usage into _acc if provided."""
     for attempt in range(1, max_retries + 1):
         try:
             kwargs: dict[str, Any] = {"model": MODEL, "messages": messages}
             if tools:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
-            return client.chat.completions.create(**kwargs)
+            response = client.chat.completions.create(**kwargs)
+            if _acc is not None:
+                _acc.add(response)
+            return response
         except Exception as exc:
             err = str(exc)
             retryable = any(c in err for c in ("429", "500", "502", "503", "504"))
@@ -190,19 +175,17 @@ def _run_mcp_loop(
     query: str,
     groq_tools: list[dict],
     max_iters: int = 8,
+    _acc: _UsageAccum | None = None,
 ) -> tuple[str, list[ToolCall]]:
-    """Run a Groq tool-calling loop using server-discovered MCP tools.
-
-    Returns (final_answer_text, tools_called_list).
-    """
+    """Run a Groq tool-calling loop using server-discovered MCP tools."""
     messages: list[dict] = [
-        {"role": "system", "content": _MCP_LOOP_SYSTEM},
+        {"role": "system", "content": MCP_LOOP_SYSTEM},
         {"role": "user", "content": query},
     ]
     tools_called: list[ToolCall] = []
 
     for _ in range(max_iters):
-        resp = _llm_call(client, messages, tools=groq_tools)
+        resp = _llm_call(client, messages, tools=groq_tools, _acc=_acc)
         msg = resp.choices[0].message
 
         if not msg.tool_calls:
@@ -241,20 +224,16 @@ def _fetch_all_mcp_standards(
     client: Groq,
     mcp: MCPHttpClient,
     groq_tools: list[dict],
+    _acc: _UsageAccum | None = None,
 ) -> tuple[str, list[ToolCall]]:
-    """Fetch the complete MCP standards in a single tool-calling pass.
-
-    Instructs the LLM to call all four MCP tools so we get the full picture
-    (template, structure, required clauses, and every clause's requirements)
-    before running the document compliance analysis.
-    """
+    """Fetch the complete MCP standards in a single tool-calling pass."""
     query = (
         "Retrieve ALL company contract standards in full detail: "
         "the active template, the required document sections in order, "
         "all required clause codes, and the detailed requirements for "
         "EVERY required clause. Call all necessary tools."
     )
-    return _run_mcp_loop(client, mcp, query, groq_tools, max_iters=12)
+    return _run_mcp_loop(client, mcp, query, groq_tools, max_iters=12, _acc=_acc)
 
 
 # ── Full-document analysis helpers ────────────────────────────────────────
@@ -264,6 +243,7 @@ def _analyse_single_pass(
     doc_text: str,
     system_prompt: str,
     user_prompt: str,
+    _acc: _UsageAccum | None = None,
 ) -> str:
     """Send the entire document in one LLM call."""
     return _llm_call(
@@ -272,6 +252,7 @@ def _analyse_single_pass(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
+        _acc=_acc,
     ).choices[0].message.content
 
 
@@ -280,13 +261,9 @@ def _analyse_section_by_section(
     doc_text: str,
     standards_text: str,
     mcp_sections: list[str],
+    _acc: _UsageAccum | None = None,
 ) -> str:
-    """Split the document by MCP section codes and analyse each independently.
-
-    Used when the full document exceeds _SINGLE_PASS_TOKEN_LIMIT tokens.
-    Each section is analysed against its relevant standards, then a final
-    synthesis call produces the consolidated compliance report.
-    """
+    """Split the document by MCP section codes and analyse each independently."""
     section_reports: list[str] = []
 
     for section_code in mcp_sections:
@@ -300,14 +277,14 @@ def _analyse_section_by_section(
         report = _llm_call(
             client,
             messages=[
-                {"role": "system", "content": _SECTION_ANALYSIS_SYSTEM},
+                {"role": "system", "content": SECTION_ANALYSIS_SYSTEM},
                 {"role": "user", "content": section_prompt},
             ],
+            _acc=_acc,
         ).choices[0].message.content
         section_reports.append(f"### Section: {section_code}\n{report}")
         logger.debug("Section analysis done: %s", section_code)
 
-    # Synthesise all section reports into one final compliance report
     synthesis_prompt = (
         "SECTION-BY-SECTION ANALYSIS:\n\n"
         + "\n\n---\n\n".join(section_reports)
@@ -316,17 +293,29 @@ def _analyse_section_by_section(
     return _llm_call(
         client,
         messages=[
-            {"role": "system", "content": _SECTION_SYNTHESIS_SYSTEM},
+            {"role": "system", "content": SECTION_SYNTHESIS_SYSTEM},
             {"role": "user", "content": synthesis_prompt},
         ],
+        _acc=_acc,
     ).choices[0].message.content
 
 
 # ── Route handlers ────────────────────────────────────────────────────────
 
-def _handle_rag(query: str, route_reason: str, **rag_kwargs) -> RouteResult:
+def _handle_rag(
+    query: str,
+    route_reason: str,
+    _acc: _UsageAccum,
+    **rag_kwargs,
+) -> RouteResult:
     logger.info("[Router] RAG path: %r", query[:80])
-    result = answer_question(query, **rag_kwargs)
+    # log=False: the router logs this request with full route context instead
+    result = answer_question(query, log=False, **rag_kwargs)
+
+    # Carry observability data from the generator into the accumulator
+    _acc.input_tokens  += result.get("_input_tokens",  0)
+    _acc.output_tokens += result.get("_output_tokens", 0)
+
     return RouteResult(
         answer=result["answer"],
         route=Route.RAG,
@@ -339,6 +328,8 @@ def _handle_rag(query: str, route_reason: str, **rag_kwargs) -> RouteResult:
         vector_chunks=result.get("vector_chunks", []),
         bm25_chunks=result.get("bm25_chunks", []),
         mmr_chunks=result.get("mmr_chunks", []),
+        spans_ms=result.get("_spans_ms", {}),
+        retrieved_context_ids=result.get("_retrieved_context_ids", []),
     )
 
 
@@ -348,9 +339,13 @@ def _handle_mcp(
     groq_tools: list[dict],
     query: str,
     route_reason: str,
+    _acc: _UsageAccum,
 ) -> RouteResult:
     logger.info("[Router] MCP path: %r", query[:80])
-    answer, tools_called = _run_mcp_loop(client, mcp, query, groq_tools)
+    t0 = time.perf_counter()
+    answer, tools_called = _run_mcp_loop(client, mcp, query, groq_tools, _acc=_acc)
+    generation_ms = (time.perf_counter() - t0) * 1000
+
     return RouteResult(
         answer=answer,
         route=Route.MCP,
@@ -359,6 +354,7 @@ def _handle_mcp(
         confidence="high",
         out_of_scope=False,
         mcp_tools_called=tools_called,
+        spans_ms={"retrieval": 0.0, "reranking": 0.0, "generation": round(generation_ms, 1)},
     )
 
 
@@ -368,11 +364,15 @@ def _handle_both(
     groq_tools: list[dict],
     query: str,
     route_reason: str,
+    _acc: _UsageAccum,
     **rag_kwargs,
 ) -> RouteResult:
     logger.info("[Router] BOTH path: %r", query[:80])
+    t0 = time.perf_counter()
 
-    rag_result = answer_question(query, **rag_kwargs)
+    rag_result = answer_question(query, log=False, **rag_kwargs)
+    _acc.input_tokens  += rag_result.get("_input_tokens",  0)
+    _acc.output_tokens += rag_result.get("_output_tokens", 0)
 
     if rag_result.get("out_of_scope"):
         logger.warning("[Router] Query blocked by guardrails — skipping MCP")
@@ -383,17 +383,18 @@ def _handle_both(
             reasoning=rag_result.get("reasoning", ""),
             confidence=rag_result.get("confidence", "high"),
             out_of_scope=True,
+            spans_ms=rag_result.get("_spans_ms", {}),
         )
 
     rag_answer = rag_result.get("answer", "No relevant content found in the documents.")
 
     mcp_query = f"What do the company standards require regarding: {query}"
-    mcp_answer, tools_called = _run_mcp_loop(client, mcp, mcp_query, groq_tools)
+    mcp_answer, tools_called = _run_mcp_loop(client, mcp, mcp_query, groq_tools, _acc=_acc)
 
     synthesis = _llm_call(
         client,
         messages=[
-            {"role": "system", "content": _CLAUSE_SYNTHESIS_SYSTEM},
+            {"role": "system", "content": CLAUSE_SYNTHESIS_SYSTEM},
             {
                 "role": "user",
                 "content": (
@@ -403,7 +404,10 @@ def _handle_both(
                 ),
             },
         ],
+        _acc=_acc,
     )
+
+    total_ms = (time.perf_counter() - t0) * 1000
 
     return RouteResult(
         answer=synthesis.choices[0].message.content,
@@ -420,6 +424,8 @@ def _handle_both(
         vector_chunks=rag_result.get("vector_chunks", []),
         bm25_chunks=rag_result.get("bm25_chunks", []),
         mmr_chunks=rag_result.get("mmr_chunks", []),
+        retrieved_context_ids=rag_result.get("_retrieved_context_ids", []),
+        spans_ms={"retrieval": 0.0, "reranking": 0.0, "generation": round(total_ms, 1)},
     )
 
 
@@ -428,6 +434,7 @@ def _handle_full_doc(
     query: str,
     route_reason: str,
     full_doc_texts: dict[str, str] | None,
+    _acc: _UsageAccum,
 ) -> RouteResult:
     """Load the full document and answer without MCP."""
     logger.info("[Router] FULL_DOC path: %r", query[:80])
@@ -444,12 +451,12 @@ def _handle_full_doc(
             out_of_scope=False,
         )
 
-    logger.info(
-        "[Router] Full doc loaded: %d tokens from %s", doc.estimated_tokens, doc.filenames
-    )
+    logger.info("[Router] Full doc loaded: %d tokens from %s", doc.estimated_tokens, doc.filenames)
 
+    t0 = time.perf_counter()
     user_prompt = f"CONTRACT TEXT:\n\n{doc.text}\n\nUSER REQUEST:\n{query}"
-    answer = _analyse_single_pass(client, doc.text, _FULL_DOC_SYSTEM, user_prompt)
+    answer = _analyse_single_pass(client, doc.text, FULL_DOC_SYSTEM, user_prompt, _acc=_acc)
+    generation_ms = (time.perf_counter() - t0) * 1000
 
     return RouteResult(
         answer=answer,
@@ -463,6 +470,7 @@ def _handle_full_doc(
         out_of_scope=False,
         doc_filenames=doc.filenames,
         doc_token_estimate=doc.estimated_tokens,
+        spans_ms={"retrieval": 0.0, "reranking": 0.0, "generation": round(generation_ms, 1)},
     )
 
 
@@ -473,11 +481,11 @@ def _handle_full_doc_mcp(
     query: str,
     route_reason: str,
     full_doc_texts: dict[str, str] | None,
+    _acc: _UsageAccum,
 ) -> RouteResult:
     """Load the full document AND fetch ALL MCP standards → compliance report."""
     logger.info("[Router] FULL_DOC_MCP path: %r", query[:80])
 
-    # Step 1 — Load full document text
     try:
         doc = load_full_text(full_doc_texts)
     except DocumentLoadError as exc:
@@ -490,17 +498,13 @@ def _handle_full_doc_mcp(
             out_of_scope=False,
         )
 
-    logger.info(
-        "[Router] Full doc loaded: %d tokens from %s", doc.estimated_tokens, doc.filenames
-    )
+    logger.info("[Router] Full doc loaded: %d tokens from %s", doc.estimated_tokens, doc.filenames)
 
-    # Step 2 — Fetch ALL MCP standards in one tool-calling pass
-    standards_text, tools_called = _fetch_all_mcp_standards(client, mcp, groq_tools)
-    logger.info(
-        "[Router] MCP standards fetched via %d tool call(s)", len(tools_called)
-    )
+    t0 = time.perf_counter()
 
-    # Step 3 — Compliance analysis: single pass or section-by-section
+    standards_text, tools_called = _fetch_all_mcp_standards(client, mcp, groq_tools, _acc=_acc)
+    logger.info("[Router] MCP standards fetched via %d tool call(s)", len(tools_called))
+
     if doc.estimated_tokens <= _SINGLE_PASS_TOKEN_LIMIT:
         logger.info("[Router] Single-pass compliance analysis (%d tokens)", doc.estimated_tokens)
         user_prompt = (
@@ -508,22 +512,22 @@ def _handle_full_doc_mcp(
             f"CONTRACT TEXT (complete):\n{doc.text}\n\n"
             f"USER REQUEST:\n{query}"
         )
-        answer = _analyse_single_pass(client, doc.text, _FULL_DOC_MCP_SYSTEM, user_prompt)
+        answer = _analyse_single_pass(client, doc.text, FULL_DOC_MCP_SYSTEM, user_prompt, _acc=_acc)
     else:
         logger.info(
             "[Router] Document too large (%d tokens > %d) — section-by-section analysis",
-            doc.estimated_tokens,
-            _SINGLE_PASS_TOKEN_LIMIT,
+            doc.estimated_tokens, _SINGLE_PASS_TOKEN_LIMIT,
         )
-        # Extract section codes from the standards text for splitting
         mcp_sections = [
             "PARTIES", "DEFINITIONS", "SCOPE", "PAYMENT",
             "TERMINATION", "CONFIDENTIALITY", "DATA_PROTECTION",
             "LIABILITY", "GOVERNING_LAW", "DISPUTE",
         ]
         answer = _analyse_section_by_section(
-            client, doc.text, standards_text, mcp_sections
+            client, doc.text, standards_text, mcp_sections, _acc=_acc
         )
+
+    generation_ms = (time.perf_counter() - t0) * 1000
 
     return RouteResult(
         answer=answer,
@@ -539,6 +543,7 @@ def _handle_full_doc_mcp(
         mcp_tools_called=tools_called,
         doc_filenames=doc.filenames,
         doc_token_estimate=doc.estimated_tokens,
+        spans_ms={"retrieval": 0.0, "reranking": 0.0, "generation": round(generation_ms, 1)},
     )
 
 
@@ -550,11 +555,6 @@ _groq_tools_cache: list[dict] | None = None
 
 
 def _get_groq_tools() -> list[dict]:
-    """Fetch and cache sanitized MCP Groq tools from the server (tools/list).
-
-    Cached in-process — no repeated network call per query.
-    Call invalidate_tools_cache() to force a refresh (e.g. after server restart).
-    """
     global _groq_tools_cache
     if _groq_tools_cache is None:
         _groq_tools_cache = _mcp_client.to_groq_tools()
@@ -579,23 +579,26 @@ def route(
     full_doc_texts: dict[str, str] | None = None,
     **rag_kwargs,
 ) -> RouteResult:
-    """Classify a query and dispatch to the correct data source(s).
+    """Classify a query, dispatch to the correct data source(s), and log.
 
-    Args:
-        query:          The user's natural-language question.
-        full_doc_texts: Mapping of {filename: full_text} stored by app.py
-                        at index-build time. Required for full_doc and
-                        full_doc_mcp routes; falls back to ChromaDB if None.
-        **rag_kwargs:   Forwarded to ``rag.pipeline.answer_question``
-                        (search_mode, retrieval_k, mmr_k, mmr_lambda,
-                        final_k, conversation_history, document_type).
-
-    Returns:
-        RouteResult with the answer and full provenance metadata.
+    Every call writes one structured record to data/logs/requests.jsonl.
+    Token counts span ALL LLM calls made by the route handler (classifier,
+    retrieval LLM, synthesis LLM, MCP tool-calling loop, etc.).
     """
+    t_route_start = time.perf_counter()
+    _acc = _UsageAccum()
+
+    # ── Classify ──────────────────────────────────────────────────────────
     classification = _classifier.classify(query)
     client = _get_client()
     r = classification.route
+
+    classifier_decision = {
+        "route":                     classification.route,
+        "reason":                    classification.reason,
+        "classifier_prompt_version": CLASSIFIER_PROMPT_VERSION,
+        "agent_prompt_version":      AGENT_PROMPT_VERSION,
+    }
 
     # ── MCP-dependent routes: check server availability first ─────────────
     mcp_needed = r in (Route.MCP, Route.BOTH, Route.FULL_DOC_MCP)
@@ -606,26 +609,42 @@ def route(
         )
         logger.warning("[Router] %s", fallback_reason)
         if r == Route.FULL_DOC_MCP:
-            return _handle_full_doc(client, query, fallback_reason, full_doc_texts)
-        return _handle_rag(query, fallback_reason, **rag_kwargs)
+            result = _handle_full_doc(client, query, fallback_reason, full_doc_texts, _acc)
+        else:
+            result = _handle_rag(query, fallback_reason, _acc, **rag_kwargs)
+    else:
+        groq_tools = _get_groq_tools() if mcp_needed else []
 
-    groq_tools = _get_groq_tools() if mcp_needed else []
+        if r == Route.MCP:
+            result = _handle_mcp(client, _mcp_client, groq_tools, query, classification.reason, _acc)
+        elif r == Route.BOTH:
+            result = _handle_both(client, _mcp_client, groq_tools, query, classification.reason, _acc, **rag_kwargs)
+        elif r == Route.FULL_DOC:
+            result = _handle_full_doc(client, query, classification.reason, full_doc_texts, _acc)
+        elif r == Route.FULL_DOC_MCP:
+            result = _handle_full_doc_mcp(client, _mcp_client, groq_tools, query, classification.reason, full_doc_texts, _acc)
+        else:
+            result = _handle_rag(query, classification.reason, _acc, **rag_kwargs)
 
-    if r == Route.MCP:
-        return _handle_mcp(client, _mcp_client, groq_tools, query, classification.reason)
+    total_route_ms = (time.perf_counter() - t_route_start) * 1000
 
-    if r == Route.BOTH:
-        return _handle_both(
-            client, _mcp_client, groq_tools, query, classification.reason, **rag_kwargs
-        )
+    # Merge route-level span total if handler didn't populate spans_ms
+    if not result.spans_ms:
+        result.spans_ms = {"retrieval": 0.0, "reranking": 0.0, "generation": round(total_route_ms, 1)}
 
-    if r == Route.FULL_DOC:
-        return _handle_full_doc(client, query, classification.reason, full_doc_texts)
+    # ── Log every route — single log point for all router paths ───────────
+    log_request(
+        query=query,
+        answer=result.answer,
+        route=str(result.route),
+        prompt_version=PROMPT_VERSION,
+        retrieved_context_ids=result.retrieved_context_ids,
+        spans_ms=result.spans_ms,
+        input_tokens=_acc.input_tokens,
+        output_tokens=_acc.output_tokens,
+        mcp_tools_called=[t.name for t in result.mcp_tools_called],
+        classifier_decision=classifier_decision,
+        out_of_scope=result.out_of_scope,
+    )
 
-    if r == Route.FULL_DOC_MCP:
-        return _handle_full_doc_mcp(
-            client, _mcp_client, groq_tools, query, classification.reason, full_doc_texts
-        )
-
-    # Default: RAG
-    return _handle_rag(query, classification.reason, **rag_kwargs)
+    return result

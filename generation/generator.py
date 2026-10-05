@@ -1,8 +1,10 @@
 """Answer generation: build RAG prompt and call the LLM."""
 
+import time
+
 from core import config
 from retrieval.vector_store import retrieve, get_collection
-from generation.prompts import SYSTEM_PROMPT
+from generation.prompts import SYSTEM_PROMPT, PROMPT_VERSION
 from week7.llm_client import get_client, groq_call_with_retry
 
 client = get_client()
@@ -42,10 +44,30 @@ def _extract_sources(results: dict) -> list[dict]:
     return sources
 
 
+def _extract_chunk_ids(results: dict) -> list[str]:
+    """Extract ChromaDB chunk IDs from a query result dict."""
+    ids = results.get("ids")
+    if ids and ids[0]:
+        return list(ids[0])
+    # Fallback: build IDs from metadata when ids key is absent
+    metas = results.get("metadatas", [[]])[0]
+    return [
+        f"{m.get('source', 'unknown')}_p{m.get('page', 0)}_{i}"
+        for i, m in enumerate(metas)
+    ]
+
+
 class GeminiGenerator:
     """Generator class that wraps retrieval + reranking + generation.
 
     Pipeline: Retrieval → MMR → Cross-Encoder → LLM → answer
+
+    The result dict always contains observability keys (prefixed with _):
+        _spans_ms              per-stage wall-clock milliseconds
+        _input_tokens          prompt token count from response.usage
+        _output_tokens         completion token count from response.usage
+        _retrieved_context_ids ChromaDB chunk IDs used for context
+        _prompt_version        PROMPT_VERSION string at call time
     """
 
     def __init__(self, model: str | None = None):
@@ -68,6 +90,9 @@ class GeminiGenerator:
         raw_vector_chunks: list = []
         raw_bm25_chunks: list = []
 
+        # ── Stage 1: Retrieval ────────────────────────────────────────────
+        t_retrieval_start = time.perf_counter()
+
         if search_mode == "hybrid":
             from retrieval.hybrid_search import hybrid_retrieve
             results = hybrid_retrieve(query, top_k=retrieval_k, where=where)
@@ -85,6 +110,8 @@ class GeminiGenerator:
             retrieval_label = "Vector (semantic) search"
             raw_vector_chunks = self._format_raw_chunks(results, "vector")
 
+        retrieval_ms = (time.perf_counter() - t_retrieval_start) * 1000
+
         if not results["documents"] or not results["documents"][0]:
             return {
                 "answer":       "I could not find relevant information in the provided documents.",
@@ -95,7 +122,15 @@ class GeminiGenerator:
                 "mmr_chunks":   [],
                 "confidence":   "low",
                 "out_of_scope": False,
+                "_spans_ms":              {"retrieval": round(retrieval_ms, 1), "reranking": 0.0, "generation": 0.0},
+                "_input_tokens":          0,
+                "_output_tokens":         0,
+                "_retrieved_context_ids": [],
+                "_prompt_version":        PROMPT_VERSION,
             }
+
+        # ── Stage 2: MMR + Reranking ──────────────────────────────────────
+        t_rerank_start = time.perf_counter()
 
         mmr_results    = mmr_rerank(query, results, mmr_k=mmr_k, mmr_lambda=mmr_lambda)
         raw_mmr_chunks = self._format_mmr_chunks(mmr_results)
@@ -116,6 +151,11 @@ class GeminiGenerator:
             mmr_map = dict(zip(mmr_results["documents"][0], mmr_results["mmr_scores"]))
             reranked["mmr_scores"] = [mmr_map.get(d) for d in reranked["documents"][0]]
 
+        reranking_ms = (time.perf_counter() - t_rerank_start) * 1000
+
+        # Extract chunk IDs for observability before building context
+        retrieved_context_ids = _extract_chunk_ids(reranked)
+
         context = _build_context(reranked)
         sources = _extract_sources(reranked)
 
@@ -128,6 +168,9 @@ class GeminiGenerator:
             if i < len(mmr_scores) and mmr_scores[i] is not None:
                 source["mmr_score"] = round(mmr_scores[i], 6)
             source["retrieved_by"] = retrieval_origins[i] if i < len(retrieval_origins) else search_mode
+
+        # ── Stage 3: LLM Generation ───────────────────────────────────────
+        t_gen_start = time.perf_counter()
 
         prompt = f"""{SYSTEM_PROMPT}
 
@@ -142,6 +185,15 @@ USER QUESTION:
         messages = list(conversation_history or [])
         messages.append({"role": "user", "content": prompt})
         response = groq_call_with_retry(client, model=self.model, messages=messages)
+
+        generation_ms = (time.perf_counter() - t_gen_start) * 1000
+
+        # Read actual token counts from the API response
+        input_tokens  = 0
+        output_tokens = 0
+        if hasattr(response, "usage") and response.usage:
+            input_tokens  = getattr(response.usage, "prompt_tokens",     0) or 0
+            output_tokens = getattr(response.usage, "completion_tokens", 0) or 0
 
         n_rrf = len(results.get("documents", [[]])[0])
         n_mmr = len(mmr_results.get("documents", [[]])[0])
@@ -160,6 +212,16 @@ USER QUESTION:
             "mmr_chunks":    raw_mmr_chunks,
             "confidence":    "high" if sources else "low",
             "out_of_scope":  False,
+            # ── Observability fields ──────────────────────────────────────
+            "_spans_ms": {
+                "retrieval":  round(retrieval_ms,  1),
+                "reranking":  round(reranking_ms,  1),
+                "generation": round(generation_ms, 1),
+            },
+            "_input_tokens":          input_tokens,
+            "_output_tokens":         output_tokens,
+            "_retrieved_context_ids": retrieved_context_ids,
+            "_prompt_version":        PROMPT_VERSION,
         }
 
     @staticmethod
