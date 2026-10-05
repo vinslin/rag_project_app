@@ -4,6 +4,9 @@
 # RAG data
 data/
 
+# Contract PDFs and generated docs
+documents/
+docs/
 
 # Python cache
 __pycache__/
