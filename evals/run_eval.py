@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
-Evaluation Runner for Legal Contract RAG
+Evaluation Runner — Shared Corpus Golden Set (32 cases)
 
-Runs evaluation over evals/dataset.json using LLM Judge (judge_v1.txt or judge_v2.txt).
-Prints overall pass rate and pass rates broken down by Week 5 taxonomy mode.
+Reads evals/golden_set.json and runs every case through the RAG pipeline.
+Reports pass rate by class:
+    direct_lookup, amendment_supersession, counterparty_disambiguation,
+    out_of_scope, defined_term_chase, multi_hop_dependent, computation,
+    version_comparison, cross_document
+
+Failure breakdown:
+    fail_wrong_version, fail_wrong_counterparty,
+    fail_hallucination, fail_false_refusal
+
+Usage:
+    python evals/run_eval.py              # use cached predictions
+    python evals/run_eval.py --recompute  # regenerate all predictions
 """
 
 import argparse
@@ -13,55 +24,45 @@ import sys
 from collections import defaultdict
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Project directory paths
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET_PATH = os.path.join(BASE_DIR, "dataset.json")
-LABELS_PATH = os.path.join(BASE_DIR, "labels_25.json")
+BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
+DATASET_PATH    = os.path.join(BASE_DIR, "golden_set.json")
 PREDICTION_PATH = os.path.join(BASE_DIR, "prediction.txt")
-JUDGE_V1_PATH = os.path.join(BASE_DIR, "judge_v1.txt")
-JUDGE_V2_PATH = os.path.join(BASE_DIR, "judge_v2.txt")
+JUDGE_V1_PATH   = os.path.join(BASE_DIR, "judge_v1.txt")
+JUDGE_V2_PATH   = os.path.join(BASE_DIR, "judge_v2.txt")
 RESULTS_V1_PATH = os.path.join(BASE_DIR, "results_v1.json")
 RESULTS_V2_PATH = os.path.join(BASE_DIR, "results_v2.json")
 
-# Ensure rag package is in python path
 APP_ROOT = os.path.abspath(os.path.join(BASE_DIR, ".."))
 if APP_ROOT not in sys.path:
     sys.path.insert(0, APP_ROOT)
 
 try:
-    from rag.pipeline import answer_question
+    from pipeline.rag import answer_question
 except ImportError:
     answer_question = None
 
 
-def get_genai_client():
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        return None
-    try:
-        from google import genai
-        return genai.Client(api_key=api_key)
-    except Exception as e:
-        print(f"Warning: Failed to initialize genai Client: {e}")
-        return None
-
+# ── Index auto-build ──────────────────────────────────────────────────────────
 
 def ensure_index_built():
-    """Ensure ChromaDB & BM25 index is built from documents/*.pdf if empty."""
+    """Index all documents in documents/ if ChromaDB is empty."""
     import glob
     try:
-        from rag.ingestion.pdf_loader import load_pdf
-        from rag.ingestion.chunker import chunk_document
-        from rag.retrieval.vector_store import build_index, clear_index, chroma_client
-        from rag import config
+        from ingestion.pdf_loader import load_document
+        from ingestion.chunker import chunk_document
+        from retrieval.vector_store import build_index, clear_index, chroma_client
+        from core import config
 
-        docs_dir = os.path.join(APP_ROOT, "documents")
-        pdf_files = sorted(glob.glob(os.path.join(docs_dir, "*.pdf")))
-        if not pdf_files:
-            print("Warning: No PDF files found in documents/ folder.")
+        docs_dir  = os.path.join(APP_ROOT, "documents")
+        doc_files = sorted(
+            glob.glob(os.path.join(docs_dir, "*.pdf")) +
+            glob.glob(os.path.join(docs_dir, "*.docx")) +
+            glob.glob(os.path.join(docs_dir, "*.md"))
+        )
+        if not doc_files:
+            print("Warning: No documents found in documents/ folder.")
             return
 
         try:
@@ -71,279 +72,318 @@ def ensure_index_built():
         except Exception:
             pass
 
-        print(f"Indexing {len(pdf_files)} PDF(s) from documents/...")
+        print(f"Indexing {len(doc_files)} document(s) from documents/...")
         clear_index(config.COLLECTION_NAME)
-        all_chunks = []
-        for pdf_path in pdf_files:
-            pages = load_pdf(pdf_path)
+        total_chunks = 0
+        for doc_path in doc_files:
+            pages = load_document(doc_path)
             for page in pages:
-                chunks = chunk_document(page["text"], config.CHUNK_SIZE_TOKENS, config.CHUNK_OVERLAP_TOKENS)
-                build_index(chunks, config.COLLECTION_NAME, source=page["source"], page=page["page"])
-                all_chunks.extend(chunks)
-        print(f"Successfully indexed {len(all_chunks)} chunks.")
+                meta = {k: page.get(k, "") for k in
+                        ["source_doc", "counterparty", "effective_date", "doc_type"]}
+                chunks = chunk_document(page["text"], metadata=meta)
+                build_index(chunks, config.COLLECTION_NAME,
+                            source=page["source"], page=page["page"])
+                total_chunks += len(chunks)
+        print(f"Indexed {total_chunks} chunks from {len(doc_files)} document(s).")
     except Exception as e:
         print(f"Warning: Could not auto-build index: {e}")
 
 
-def run_pipeline_predictions(dataset):
-    """Run RAG pipeline over dataset questions and return dict of predictions."""
+# ── Prediction generation ─────────────────────────────────────────────────────
+
+def run_pipeline_predictions(dataset: list) -> dict:
+    """Run every case through the RAG pipeline; return {id: {question, prediction}}."""
     ensure_index_built()
-    print("Generating pipeline predictions for dataset...")
+    print("Generating pipeline predictions for all cases...")
     predictions = {}
-    
+
     for case in dataset:
-        case_id = case["id"]
+        case_id  = case["id"]
         question = case["question"]
         if answer_question:
             try:
-                res = answer_question(question)
+                res    = answer_question(question)
                 answer = res.get("answer", "")
             except Exception as e:
-                answer = f"Error generating answer: {e}"
+                answer = f"Error: {e}"
         else:
             answer = "Pipeline unavailable."
-        
-        predictions[case_id] = {
-            "question": question,
-            "prediction": answer
-        }
-    
-    # Save to prediction.txt as formatted text / JSONL
-    with open(PREDICTION_PATH, "w", encoding="utf-8") as f:
+
+        predictions[case_id] = {"question": question, "prediction": answer}
+
+    with open(PREDICTION_PATH, "w", encoding="utf-8") as fh:
         for cid, pdata in predictions.items():
-            f.write(json.dumps({"id": cid, "question": pdata["question"], "predicted_answer": pdata["prediction"]}, ensure_ascii=False) + "\n")
-            
+            fh.write(json.dumps({
+                "id": cid,
+                "question": pdata["question"],
+                "predicted_answer": pdata["prediction"],
+            }, ensure_ascii=False) + "\n")
+
     print(f"Saved predictions to {PREDICTION_PATH}")
     return predictions
 
 
-def load_predictions(dataset):
-    """Load existing predictions from prediction.txt or run pipeline if missing."""
+def load_predictions(dataset: list) -> dict:
+    """Load cached predictions or run pipeline if cache is missing."""
     if not os.path.exists(PREDICTION_PATH):
         return run_pipeline_predictions(dataset)
-    
+
     predictions = {}
-    with open(PREDICTION_PATH, "r", encoding="utf-8") as f:
-        for line in f:
+    with open(PREDICTION_PATH, encoding="utf-8") as fh:
+        for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
                 item = json.loads(line)
                 predictions[item["id"]] = {
-                    "question": item.get("question", ""),
-                    "prediction": item.get("predicted_answer", "")
+                    "question":   item.get("question", ""),
+                    "prediction": item.get("predicted_answer", ""),
                 }
             except Exception:
                 continue
-                
-    # If any case is missing, recompute
+
     missing = [c["id"] for c in dataset if c["id"] not in predictions]
     if missing:
-        print(f"Missing predictions for {len(missing)} cases. Recomputing...")
+        print(f"Missing predictions for {len(missing)} case(s). Recomputing...")
         return run_pipeline_predictions(dataset)
-        
+
     return predictions
 
 
-def clean_json_response(raw_text):
-    """Clean markdown backticks from model output before parsing JSON."""
-    raw = raw_text.strip()
+# ── LLM judge ─────────────────────────────────────────────────────────────────
+
+def _clean_json(raw: str) -> str:
+    raw = raw.strip()
     if raw.startswith("```"):
         lines = raw.splitlines()
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
+        lines = lines[1:] if lines[0].startswith("```") else lines
+        lines = lines[:-1] if lines and lines[-1].startswith("```") else lines
         raw = "\n".join(lines).strip()
     return raw
 
 
-def evaluate_case_with_llm(client, judge_template, case, predicted_answer, judge_version="v1"):
-    """Evaluate a single test case using Gemini LLM judge."""
+def get_groq_client():
+    """Return a Groq client if GROQ_API_KEY is set, else None."""
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from groq import Groq
+        return Groq(api_key=api_key)
+    except Exception as e:
+        print(f"Warning: Could not init Groq client: {e}")
+        return None
+
+
+def evaluate_case(client, judge_template: str, case: dict,
+                  predicted_answer: str) -> dict:
+    """Evaluate one case. Uses Groq LLM judge if available, else deterministic."""
     prompt = (
         judge_template
-        .replace("{question}", case["question"])
+        .replace("{question}",        case["question"])
         .replace("{expected_answer}", case["expected_answer"])
         .replace("{predicted_answer}", predicted_answer)
-        .replace("{taxonomy}", case.get("taxonomy", "unassigned"))
+        .replace("{taxonomy}",        case.get("class", "unassigned"))
     )
 
     if client:
         try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt
+            from core import config
+            resp = client.chat.completions.create(
+                model=config.GENERATION_MODEL,
+                messages=[{"role": "user", "content": prompt}],
             )
-            text = clean_json_response(response.text)
+            text   = _clean_json(resp.choices[0].message.content)
             parsed = json.loads(text)
             return {
-                "status": parsed.get("status", "FAIL").upper(),
-                "score": float(parsed.get("score", 0.0)),
-                "reasoning": parsed.get("reasoning", "Evaluated by LLM Judge"),
-                "error_category": parsed.get("error_category", None)
+                "status":         parsed.get("status", "FAIL").upper(),
+                "score":          float(parsed.get("score", 0.0)),
+                "reasoning":      parsed.get("reasoning", "LLM judge"),
+                "error_category": parsed.get("error_category"),
             }
-        except Exception as e:
-            # Deterministic fallback evaluation if JSON parsing or API fails
-            pass
+        except Exception:
+            pass  # fall through to deterministic
 
-    # Deterministic rule-based fallback judge logic
-    exp_lower = case["expected_answer"].lower()
+    # ── Deterministic fallback ────────────────────────────────────────────────
     pred_lower = predicted_answer.lower()
-    tax = case.get("taxonomy", "")
+    refusal_phrases = [
+        "could not find", "not in the corpus", "no such", "not exist",
+        "no apex", "no amendments", "no separate",
+    ]
 
-    if tax == "guardrail_trigger":
-        passed = ("rejected" in pred_lower or "out of scope" in pred_lower or "cannot" in pred_lower or "not able" in pred_lower or "prohibited" in pred_lower)
-    elif tax == "amendment_override_failure":
-        # Check key terms for overrides
-        if "15" in exp_lower:
-            passed = ("15 days" in pred_lower or "fifteen" in pred_lower)
-        elif "45" in exp_lower:
-            passed = ("45" in pred_lower or "forty-five" in pred_lower)
-        else:
-            passed = any(w in pred_lower for w in ["amendment", "supersedes", "replaced"])
+    if case.get("refusal_expected"):
+        passed = any(p in pred_lower for p in refusal_phrases)
+        error  = None if passed else "fail_false_refusal"
     else:
-        # Key string overlaps
-        keywords = [w for w in exp_lower.replace(",", "").replace(".", "").split() if len(w) > 4]
-        overlap = sum(1 for k in keywords if k in pred_lower)
-        passed = (overlap >= max(1, len(keywords) // 3)) or (exp_lower in pred_lower)
-
-    status = "PASS" if passed else "FAIL"
-    score = 1.0 if passed else 0.0
-    reasoning = f"Rule-based evaluation fallback (status: {status})."
+        expected_values = case.get("expected_values", [])
+        if expected_values:
+            passed = all(v.lower() in pred_lower for v in expected_values)
+        else:
+            passed = case["expected_answer"].lower() in pred_lower
+        if not passed:
+            # Classify failure type
+            sup = (case.get("superseded_value") or "").lower()
+            dis = (case.get("distractor_value") or "").lower()
+            if sup and any(w in pred_lower for w in sup.split() if len(w) > 3):
+                error = "fail_wrong_version"
+            elif dis and any(w in pred_lower for w in dis.split() if len(w) > 3):
+                error = "fail_wrong_counterparty"
+            else:
+                error = "fail_hallucination"
+        else:
+            error = None
 
     return {
-        "status": status,
-        "score": score,
-        "reasoning": reasoning,
-        "error_category": None if passed else tax
+        "status":         "PASS" if passed else "FAIL",
+        "score":          1.0 if passed else 0.0,
+        "reasoning":      "Deterministic fallback.",
+        "error_category": error,
     }
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def main():
-    parser = argparse.ArgumentParser(description="Legal RAG Evaluation Harness")
-    parser.add_argument("--judge", choices=["v1", "v2"], default="v1", help="Judge version to run (v1 or v2)")
-    parser.add_argument("--recompute", action="store_true", help="Recompute pipeline predictions instead of reading cache")
+    parser = argparse.ArgumentParser(description="Legal RAG Golden Set Evaluation")
+    parser.add_argument("--judge",     choices=["v1", "v2"], default="v1")
+    parser.add_argument("--recompute", action="store_true",
+                        help="Regenerate all predictions (ignores cache)")
     args = parser.parse_args()
 
-    print(f"=== Running Legal RAG Evaluation (Judge: {args.judge}) ===")
+    print(f"=== Legal RAG Evaluation — Golden Set (Judge: {args.judge}) ===\n")
 
-    # Load Dataset
     if not os.path.exists(DATASET_PATH):
         print(f"Error: {DATASET_PATH} not found.")
         sys.exit(1)
 
-    with open(DATASET_PATH, "r", encoding="utf-8") as f:
-        dataset = json.load(f)
+    with open(DATASET_PATH, encoding="utf-8") as fh:
+        raw = json.load(fh)
+    dataset = raw["cases"]   # golden_set.json wraps cases under "cases" key
+    print(f"Loaded {len(dataset)} cases from golden_set.json")
 
-    print(f"Loaded {len(dataset)} evaluation cases from {DATASET_PATH}")
-
-    # Load Judge Prompt Template
     template_path = JUDGE_V1_PATH if args.judge == "v1" else JUDGE_V2_PATH
-    with open(template_path, "r", encoding="utf-8") as f:
-        judge_template = f.read()
-
-    # Load or generate predictions
-    if args.recompute:
-        predictions = run_pipeline_predictions(dataset)
+    if not os.path.exists(template_path):
+        print(f"Warning: Judge template not found at {template_path}. Using deterministic fallback.")
+        judge_template = ""
     else:
-        predictions = load_predictions(dataset)
+        with open(template_path, encoding="utf-8") as fh:
+            judge_template = fh.read()
 
-    # Initialize Gemini client
-    client = get_genai_client()
+    predictions = run_pipeline_predictions(dataset) if args.recompute \
+        else load_predictions(dataset)
+
+    client = get_groq_client()
     if client:
-        print("Initialized Gemini Client for LLM Judge.")
+        print("Using Groq LLM judge.")
     else:
-        print("Warning: GOOGLE_API_KEY not set or client unavailable. Using fallback deterministic evaluator.")
+        print("GROQ_API_KEY not set — using deterministic fallback judge.")
 
-    # Evaluate cases
-    eval_results = []
-    taxonomy_stats = defaultdict(lambda: {"total": 0, "passed": 0, "failed": 0})
-    total_passed = 0
+    # ── Evaluate ──────────────────────────────────────────────────────────────
+    eval_results   = []
+    class_stats    = defaultdict(lambda: {"total": 0, "passed": 0, "failed": 0})
+    failure_counts = defaultdict(int)
+    total_passed   = 0
 
-    print("\nRunning evaluation on test cases...")
+    print("\nEvaluating cases...\n")
     for case in dataset:
-        case_id = case["id"]
-        tax = case.get("taxonomy", "unassigned")
+        case_id   = case["id"]
+        cls       = case.get("class", "unassigned")
         pred_data = predictions.get(case_id, {})
-        pred_answer = pred_data.get("prediction", "")
+        pred      = pred_data.get("prediction", "")
 
-        eval_res = evaluate_case_with_llm(client, judge_template, case, pred_answer, judge_version=args.judge)
-
-        status = eval_res["status"]
-        passed = (status == "PASS")
+        result  = evaluate_case(client, judge_template, case, pred)
+        passed  = result["status"] == "PASS"
+        err_cat = result.get("error_category")
 
         if passed:
             total_passed += 1
-            taxonomy_stats[tax]["passed"] += 1
+            class_stats[cls]["passed"] += 1
         else:
-            taxonomy_stats[tax]["failed"] += 1
-        taxonomy_stats[tax]["total"] += 1
+            class_stats[cls]["failed"] += 1
+            if err_cat:
+                failure_counts[err_cat] += 1
 
-        record = {
-            "id": case_id,
-            "question": case["question"],
-            "expected_answer": case["expected_answer"],
-            "predicted_answer": pred_answer,
-            "taxonomy": tax,
-            "contract": case.get("contract", "N/A"),
-            "status": status,
-            "score": eval_res["score"],
-            "reasoning": eval_res["reasoning"],
-            "error_category": eval_res.get("error_category")
+        class_stats[cls]["total"] += 1
+
+        eval_results.append({
+            "id":               case_id,
+            "class":            cls,
+            "question":         case["question"],
+            "expected_answer":  case["expected_answer"],
+            "predicted_answer": pred,
+            "status":           result["status"],
+            "score":            result["score"],
+            "reasoning":        result["reasoning"],
+            "error_category":   err_cat,
+            "source_doc":       case.get("source_doc"),
+            "refusal_expected": case.get("refusal_expected", False),
+        })
+
+    total_cases       = len(dataset)
+    overall_pass_rate = (total_passed / total_cases * 100.0) if total_cases else 0.0
+
+    # ── Save results ──────────────────────────────────────────────────────────
+    class_breakdown = {}
+    for cls, stats in class_stats.items():
+        tot  = stats["total"]
+        pas  = stats["passed"]
+        rate = (pas / tot * 100.0) if tot else 0.0
+        class_breakdown[cls] = {
+            "total":            tot,
+            "passed":           pas,
+            "failed":           stats["failed"],
+            "pass_rate_percent": round(rate, 2),
         }
-        eval_results.append(record)
 
-    total_cases = len(dataset)
-    overall_pass_rate = (total_passed / total_cases * 100.0) if total_cases > 0 else 0.0
-
-    # Summary payload
-    taxonomy_breakdown = {}
-    for mode, stats in taxonomy_stats.items():
-        tot = stats["total"]
-        pas = stats["passed"]
-        rate = (pas / tot * 100.0) if tot > 0 else 0.0
-        taxonomy_breakdown[mode] = {
-            "total": tot,
-            "passed": pas,
-            "failed": stats["failed"],
-            "pass_rate_percent": round(rate, 2)
-        }
-
-    output_payload = {
-        "judge_version": args.judge,
-        "total_cases": total_cases,
-        "total_passed": total_passed,
-        "total_failed": total_cases - total_passed,
+    output = {
+        "judge_version":            args.judge,
+        "total_cases":              total_cases,
+        "total_passed":             total_passed,
+        "total_failed":             total_cases - total_passed,
         "overall_pass_rate_percent": round(overall_pass_rate, 2),
-        "pass_rate_by_mode": taxonomy_breakdown,
-        "cases": eval_results
+        "pass_rate_by_class":       class_breakdown,
+        "failure_breakdown":        dict(failure_counts),
+        "cases":                    eval_results,
     }
 
-    # Save results json
     results_path = RESULTS_V1_PATH if args.judge == "v1" else RESULTS_V2_PATH
-    with open(results_path, "w", encoding="utf-8") as f:
-        json.dump(output_payload, f, indent=2)
+    with open(results_path, "w", encoding="utf-8") as fh:
+        json.dump(output, fh, indent=2)
+    print(f"Results saved to {results_path}\n")
 
-    print(f"\nSaved evaluation results to {results_path}")
+    # ── Console report ────────────────────────────────────────────────────────
+    W = 62
+    print("=" * W)
+    print(f"  GOLDEN SET EVALUATION REPORT  (Judge: {args.judge})")
+    print("=" * W)
+    print(f"  Total cases : {total_cases}")
+    print(f"  Passed      : {total_passed}")
+    print(f"  Failed      : {total_cases - total_passed}")
+    print(f"  Pass rate   : {overall_pass_rate:.1f}%")
+    print("-" * W)
+    print(f"  {'CLASS':<30}  {'TOT':>3}  {'PASS':>4}  {'RATE':>7}")
+    print("-" * W)
 
-    # Print Clean Console Summary Report
-    print("\n" + "=" * 60)
-    print(f"       EVALUATION SUMMARY REPORT (Judge: {args.judge})")
-    print("=" * 60)
-    print(f"Total Test Cases:       {total_cases}")
-    print(f"Total Passed:           {total_passed}")
-    print(f"Total Failed:           {total_cases - total_passed}")
-    print(f"Overall Pass Rate:      {overall_pass_rate:.2f}%\n")
-    print("-" * 60)
-    print(f"{'TAXONOMY MODE':<30} | {'TOTAL':<6} | {'PASSED':<6} | {'PASS RATE':<10}")
-    print("-" * 60)
+    CLASS_ORDER = [
+        "direct_lookup", "amendment_supersession", "counterparty_disambiguation",
+        "out_of_scope", "defined_term_chase", "multi_hop_dependent",
+        "computation", "version_comparison", "cross_document",
+    ]
+    for cls in CLASS_ORDER:
+        if cls not in class_breakdown:
+            continue
+        s = class_breakdown[cls]
+        bar = "#" * s["passed"] + "." * s["failed"]
+        print(f"  {cls:<30}  {s['total']:>3}  {s['passed']:>4}  {s['pass_rate_percent']:>6.1f}%  {bar}")
 
-    for mode in sorted(taxonomy_breakdown.keys()):
-        stats = taxonomy_breakdown[mode]
-        print(f"{mode:<30} | {stats['total']:<6} | {stats['passed']:<6} | {stats['pass_rate_percent']:.2f}%")
+    if failure_counts:
+        print("-" * W)
+        print("  Failure breakdown:")
+        for cat, cnt in sorted(failure_counts.items(), key=lambda x: -x[1]):
+            print(f"    {cat:<35} {cnt}")
 
-    print("=" * 60 + "\n")
+    print("=" * W + "\n")
 
 
 if __name__ == "__main__":

@@ -9,34 +9,83 @@ from week7.llm_client import get_client, groq_call_with_retry
 
 client = get_client()
 
+# ── Counterparty auto-detection ───────────────────────────────────────────────
+
+_COUNTERPARTY_MAP: dict[str, str] = {
+    "northwind": "Northwind Logistics Private Limited",
+    "vertex":    "Vertex Retail Solutions Limited",
+    "halcyon":   "Halcyon Analytics GmbH",
+}
+
+
+def _detect_counterparty(query: str) -> str | None:
+    """Return the full counterparty name if the query mentions one by keyword."""
+    q = query.lower()
+    for keyword, full_name in _COUNTERPARTY_MAP.items():
+        if keyword in q:
+            return full_name
+    return None
+
+
+# ── Context builder ───────────────────────────────────────────────────────────
 
 def _build_context(results: dict) -> str:
+    """Build the DOCUMENT CONTEXT string passed to the LLM.
+
+    Chunks are sorted by effective_date descending so the latest amendment
+    always appears first — the LLM sees the most current version before
+    any superseded versions.
+    """
     documents = results["documents"][0]
     metadatas = results["metadatas"][0]
+
+    # Sort: latest effective_date first (lexicographic ISO sort works correctly)
+    items = sorted(
+        zip(documents, metadatas),
+        key=lambda x: x[1].get("effective_date", ""),
+        reverse=True,
+    )
+
     parts = []
-    for document, metadata in zip(documents, metadatas):
+    for document, metadata in items:
+        source_doc  = metadata.get("source_doc") or metadata.get("source", "")
+        counterparty = metadata.get("counterparty", "")
+        eff_date    = metadata.get("effective_date", "")
+        doc_type    = metadata.get("doc_type", "")
+        clause_ref  = metadata.get("clause_ref") or metadata.get("heading", "")
+        page        = metadata.get("page", "")
+
         parts.append(
-            f"SOURCE: {metadata['source']}\n"
-            f"PAGE: {metadata['page']}\n\n"
+            f"SOURCE DOC:     {source_doc}\n"
+            f"COUNTERPARTY:   {counterparty}\n"
+            f"EFFECTIVE DATE: {eff_date}\n"
+            f"DOC TYPE:       {doc_type}\n"
+            f"CLAUSE REF:     {clause_ref}\n"
+            f"PAGE:           {page}\n\n"
             f"{document}"
         )
     return "\n\n---\n\n".join(parts)
 
 
 def _extract_sources(results: dict) -> list[dict]:
-    documents    = results["documents"][0]
-    metadatas    = results["metadatas"][0]
-    distances    = results["distances"][0]
+    documents     = results["documents"][0]
+    metadatas     = results["metadatas"][0]
+    distances     = results["distances"][0]
     rerank_scores = results.get("rerank_scores", [None] * len(distances))
 
     sources = []
     for document, metadata, distance, rerank_score in zip(documents, metadatas, distances, rerank_scores):
         source = {
-            "source":   metadata["source"],
-            "page":     metadata["page"],
-            "heading":  metadata.get("heading", ""),
-            "distance": round(distance, 4),
-            "text":     document,
+            "source":         metadata["source"],
+            "page":           metadata["page"],
+            "heading":        metadata.get("heading", ""),
+            "source_doc":     metadata.get("source_doc", ""),
+            "counterparty":   metadata.get("counterparty", ""),
+            "effective_date": metadata.get("effective_date", ""),
+            "doc_type":       metadata.get("doc_type", ""),
+            "clause_ref":     metadata.get("clause_ref", ""),
+            "distance":       round(distance, 4),
+            "text":           document,
         }
         if rerank_score is not None:
             source["rerank_score"] = round(rerank_score, 4)
@@ -76,7 +125,7 @@ class GeminiGenerator:
     def generate(
         self,
         query: str,
-        where: dict | None = None,
+        where: dict | None = None,   # caller-supplied filter (preserved as-is if no counterparty detected)
         retrieval_k: int = config.RETRIEVAL_K,
         mmr_k: int = config.MMR_K,
         mmr_lambda: float = config.MMR_LAMBDA,
@@ -89,6 +138,12 @@ class GeminiGenerator:
 
         raw_vector_chunks: list = []
         raw_bm25_chunks: list = []
+
+        # ── Auto-inject counterparty filter when query names one ──────────
+        cp = _detect_counterparty(query)
+        if cp:
+            cp_filter = {"counterparty": {"$eq": cp}}
+            where = {"$and": [where, cp_filter]} if where else cp_filter
 
         # ── Stage 1: Retrieval ────────────────────────────────────────────
         t_retrieval_start = time.perf_counter()

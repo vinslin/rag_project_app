@@ -4,9 +4,10 @@
 # RAG data
 data/
 
-# Contract PDFs and generated docs
-documents/
+# Generated docs (drill reports, traces, cost analyses)
 docs/
+
+# documents/ is intentionally NOT gitignored — the shared corpus PDFs are committed
 
 # Python cache
 __pycache__/
