@@ -6,12 +6,12 @@ Previously lived at rag/config.py (kept as a shim for backward compat).
 
 # Chunking
 CHUNK_SIZE_TOKENS   = 500
-CHUNK_OVERLAP_TOKENS = 100
+CHUNK_OVERLAP_TOKENS = 150
 
 # Retrieval
 TOP_K          = 5
 RETRIEVAL_K    = 50     # candidates from each search method (Stage 1: RRF fusion)
-FINAL_K        = 5      # chunks kept after cross-encoder reranking (Stage 4)
+FINAL_K        = 6      # chunks kept after cross-encoder reranking (Stage 4)
 COLLECTION_NAME = "legal_contracts"
 
 # BM25 & Hybrid Search

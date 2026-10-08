@@ -93,11 +93,12 @@ def ensure_index_built():
 
 def run_pipeline_predictions(dataset: list) -> dict:
     """Run every case through the RAG pipeline; return {id: {question, prediction}}."""
+    import time
     ensure_index_built()
     print("Generating pipeline predictions for all cases...")
     predictions = {}
 
-    for case in dataset:
+    for i, case in enumerate(dataset):
         case_id  = case["id"]
         question = case["question"]
         if answer_question:
@@ -110,6 +111,9 @@ def run_pipeline_predictions(dataset: list) -> dict:
             answer = "Pipeline unavailable."
 
         predictions[case_id] = {"question": question, "prediction": answer}
+        print(f"  [{i+1}/{len(dataset)}] {case_id} done")
+        if i < len(dataset) - 1:
+            time.sleep(180)  # 3 min gap — lets Groq 200k/day rolling window recover
 
     with open(PREDICTION_PATH, "w", encoding="utf-8") as fh:
         for cid, pdata in predictions.items():
@@ -292,7 +296,15 @@ def main():
         pred_data = predictions.get(case_id, {})
         pred      = pred_data.get("prediction", "")
 
-        result  = evaluate_case(client, judge_template, case, pred)
+        if pred.startswith("Error:"):
+            result = {
+                "status": "FAIL",
+                "score": 0.0,
+                "reasoning": f"Pipeline error: {pred[:200]}",
+                "error_category": "pipeline_error",
+            }
+        else:
+            result = evaluate_case(client, judge_template, case, pred)
         passed  = result["status"] == "PASS"
         err_cat = result.get("error_category")
 

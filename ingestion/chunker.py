@@ -20,6 +20,14 @@ _CLAUSE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Matches plain-text legal section headers from PDFs (no markdown), e.g.:
+#   "1.  Definitions", "2.1 Payment Terms", "SCHEDULE A", "PART 2 — SLA"
+_LEGAL_SECTION_RE = re.compile(
+    r"^(\d{1,2}(?:\.\d{1,2})*\.?\s{1,4}\S.{2,80}"
+    r"|(?:SCHEDULE|PART|ANNEX|APPENDIX|EXHIBIT)\s+[\w\-]+.*)",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class Chunk:
@@ -36,27 +44,40 @@ class Chunk:
 def _extract_clause_ref(heading: str) -> str:
     """Return the first legal section/schedule reference found in a heading.
 
-    Falls back to the first 80 characters of the heading itself.
+    Falls back to the full heading (capped at 200 chars to stay readable).
     """
     m = _CLAUSE_RE.search(heading)
     if m:
         return m.group(0).strip()
-    return heading[:80].strip()
+    return heading[:200].strip()
 
 
 def split_into_sections(text: str) -> list[tuple[str, str]]:
-    """Split markdown text into (heading, body) pairs at heading lines."""
+    """Split text into (heading, body) pairs.
+
+    Uses markdown headings (# / ##) when present. Falls back to legal
+    numbered-section headers (e.g. "1.1 Definitions", "SCHEDULE A") for
+    plain-text PDFs that have no markdown formatting.
+    """
+    all_lines = text.splitlines()
+
+    has_markdown = any(HEADING_RE.match(ln) for ln in all_lines)
+    heading_re   = HEADING_RE if has_markdown else _LEGAL_SECTION_RE
+
     sections: list[tuple[str, str]] = []
     heading, lines = "Preamble", []
-    for line in text.splitlines():
-        match = HEADING_RE.match(line)
+
+    for line in all_lines:
+        match = heading_re.match(line.rstrip())
         if match:
             body = "\n".join(lines).strip()
             if body:
                 sections.append((heading, body))
-            heading, lines = match.group(2).strip(), []
+            heading = match.group(2).strip() if has_markdown else match.group(0).strip()
+            lines = []
         else:
             lines.append(line)
+
     body = "\n".join(lines).strip()
     if body:
         sections.append((heading, body))
@@ -91,11 +112,17 @@ def chunk_document(
 
     for heading, body in split_into_sections(text):
         clause_ref = _extract_clause_ref(heading)
-        words = body.split()
+
+        # For legal (non-markdown) sections the heading line IS part of the
+        # clause — prepend it so the full clause text is stored in one block.
+        # Preamble has no heading line to prepend.
+        full_text = body if heading == "Preamble" else f"{heading}\n{body}"
+
+        words = full_text.split()
 
         if len(words) <= chunk_size:
             chunks.append(Chunk(
-                text=body,
+                text=full_text,
                 heading=heading,
                 index=len(chunks),
                 source_doc=source_doc,

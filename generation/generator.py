@@ -141,6 +141,7 @@ class GeminiGenerator:
 
         # ── Auto-inject counterparty filter when query names one ──────────
         cp = _detect_counterparty(query)
+        cp_filter = None
         if cp:
             cp_filter = {"counterparty": {"$eq": cp}}
             where = {"$and": [where, cp_filter]} if where else cp_filter
@@ -148,22 +149,29 @@ class GeminiGenerator:
         # ── Stage 1: Retrieval ────────────────────────────────────────────
         t_retrieval_start = time.perf_counter()
 
-        if search_mode == "hybrid":
-            from retrieval.hybrid_search import hybrid_retrieve
-            results = hybrid_retrieve(query, top_k=retrieval_k, where=where)
-            retrieval_label = "Hybrid (Vector + BM25 → RRF)"
-            raw_vector_chunks = self._format_raw_chunks(results.get("vector_results", {}), "vector")
-            raw_bm25_chunks   = self._format_raw_chunks(results.get("bm25_results",   {}), "bm25")
-        elif search_mode == "bm25":
-            from retrieval.bm25_search import bm25_retrieve
-            results = bm25_retrieve(query, top_k=retrieval_k)
-            retrieval_label = "BM25 keyword search"
-            raw_bm25_chunks = self._format_raw_chunks(results, "bm25")
-        else:
-            collection = get_collection(config.COLLECTION_NAME)
-            results = retrieve(collection, query, retrieval_k, where=where)
-            retrieval_label = "Vector (semantic) search"
-            raw_vector_chunks = self._format_raw_chunks(results, "vector")
+        def _do_retrieve(where_clause):
+            if search_mode == "hybrid":
+                from retrieval.hybrid_search import hybrid_retrieve
+                r = hybrid_retrieve(query, top_k=retrieval_k, where=where_clause)
+                label = "Hybrid (Vector + BM25 → RRF)"
+                rv = self._format_raw_chunks(r.get("vector_results", {}), "vector")
+                rb = self._format_raw_chunks(r.get("bm25_results",   {}), "bm25")
+                return r, label, rv, rb
+            elif search_mode == "bm25":
+                from retrieval.bm25_search import bm25_retrieve
+                r = bm25_retrieve(query, top_k=retrieval_k)
+                return r, "BM25 keyword search", [], self._format_raw_chunks(r, "bm25")
+            else:
+                col = get_collection(config.COLLECTION_NAME)
+                r = retrieve(col, query, retrieval_k, where=where_clause)
+                return r, "Vector (semantic) search", self._format_raw_chunks(r, "vector"), []
+
+        results, retrieval_label, raw_vector_chunks, raw_bm25_chunks = _do_retrieve(where)
+
+        # Fallback: if counterparty filter returned nothing, retry without it
+        if cp_filter and (not results["documents"] or not results["documents"][0]):
+            results, retrieval_label, raw_vector_chunks, raw_bm25_chunks = _do_retrieve(None)
+            retrieval_label += " (no-filter fallback)"
 
         retrieval_ms = (time.perf_counter() - t_retrieval_start) * 1000
 
@@ -177,6 +185,27 @@ class GeminiGenerator:
                 "mmr_chunks":   [],
                 "confidence":   "low",
                 "out_of_scope": False,
+                "_spans_ms":              {"retrieval": round(retrieval_ms, 1), "reranking": 0.0, "generation": 0.0},
+                "_input_tokens":          0,
+                "_output_tokens":         0,
+                "_retrieved_context_ids": [],
+                "_prompt_version":        PROMPT_VERSION,
+            }
+
+        # ── Confidence threshold: refuse if best distance > 1.5 (too far) ──
+        # Vector distances are squared-L2; values above 1.5 indicate the
+        # retrieved chunks are semantically unrelated to the query.
+        distances = results.get("distances", [[]])[0]
+        if distances and min(distances) > 1.5:
+            return {
+                "answer":       "I could not find this information in the provided documents.",
+                "reasoning":    f"Best retrieval distance {min(distances):.3f} exceeds threshold — query is likely out of scope.",
+                "sources":      [],
+                "vector_chunks": raw_vector_chunks,
+                "bm25_chunks":  raw_bm25_chunks,
+                "mmr_chunks":   [],
+                "confidence":   "low",
+                "out_of_scope": True,
                 "_spans_ms":              {"retrieval": round(retrieval_ms, 1), "reranking": 0.0, "generation": 0.0},
                 "_input_tokens":          0,
                 "_output_tokens":         0,
