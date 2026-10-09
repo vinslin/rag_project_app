@@ -71,15 +71,19 @@ def split_into_sections(text: str) -> list[tuple[str, str]]:
         match = heading_re.match(line.rstrip())
         if match:
             body = "\n".join(lines).strip()
-            if body:
+            # Save previous section; always save non-Preamble sections even with empty body
+            # so that single-line clauses (entire clause on one line) are not dropped.
+            if body or heading != "Preamble":
                 sections.append((heading, body))
-            heading = match.group(2).strip() if has_markdown else match.group(0).strip()
+            # Use the FULL line as heading for legal sections (regex only matches a
+            # prefix of long lines, so match.group(0) would truncate the clause text).
+            heading = match.group(2).strip() if has_markdown else line.rstrip()
             lines = []
         else:
             lines.append(line)
 
     body = "\n".join(lines).strip()
-    if body:
+    if body or heading != "Preamble":
         sections.append((heading, body))
     return sections
 
@@ -113,10 +117,15 @@ def chunk_document(
     for heading, body in split_into_sections(text):
         clause_ref = _extract_clause_ref(heading)
 
-        # For legal (non-markdown) sections the heading line IS part of the
-        # clause — prepend it so the full clause text is stored in one block.
-        # Preamble has no heading line to prepend.
-        full_text = body if heading == "Preamble" else f"{heading}\n{body}"
+        # For legal (non-markdown) sections the heading line IS the clause start.
+        # Prepend it so the full clause text is in one block. For single-line
+        # clauses (body is empty), the heading IS the entire clause text.
+        if heading == "Preamble":
+            full_text = body
+        elif body:
+            full_text = f"{heading}\n{body}"
+        else:
+            full_text = heading  # entire clause fits on one line
 
         words = full_text.split()
 

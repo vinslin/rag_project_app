@@ -19,12 +19,15 @@ _COUNTERPARTY_MAP: dict[str, str] = {
 
 
 def _detect_counterparty(query: str) -> str | None:
-    """Return the full counterparty name if the query mentions one by keyword."""
+    """Return the full counterparty name if exactly ONE counterparty is mentioned.
+
+    Returns None when zero or two-or-more counterparties are detected — cross-document
+    queries (e.g. "compare Northwind and Vertex") must not be filtered to one party.
+    """
     q = query.lower()
-    for keyword, full_name in _COUNTERPARTY_MAP.items():
-        if keyword in q:
-            return full_name
-    return None
+    found = [full_name for keyword, full_name in _COUNTERPARTY_MAP.items()
+             if keyword in q]
+    return found[0] if len(found) == 1 else None
 
 
 # ── Context builder ───────────────────────────────────────────────────────────

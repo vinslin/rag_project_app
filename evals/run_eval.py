@@ -180,9 +180,22 @@ def get_groq_client():
         return None
 
 
+def _normalize(text: str) -> str:
+    """Normalize Unicode spaces/hyphens so LLM fancy punctuation doesn't break matching."""
+    import unicodedata
+    # NFKC: converts   (narrow no-break space),   (non-breaking space), etc.
+    text = unicodedata.normalize("NFKC", text)
+    # collapse any remaining whitespace sequences to a single space
+    import re
+    text = re.sub(r"\s+", " ", text)
+    return text.lower().strip()
+
+
 def evaluate_case(client, judge_template: str, case: dict,
                   predicted_answer: str) -> dict:
     """Evaluate one case. Uses Groq LLM judge if available, else deterministic."""
+    import time
+
     prompt = (
         judge_template
         .replace("{question}",        case["question"])
@@ -200,6 +213,7 @@ def evaluate_case(client, judge_template: str, case: dict,
             )
             text   = _clean_json(resp.choices[0].message.content)
             parsed = json.loads(text)
+            time.sleep(10)  # brief pause between judge calls — conserves rolling token window
             return {
                 "status":         parsed.get("status", "FAIL").upper(),
                 "score":          float(parsed.get("score", 0.0)),
@@ -210,28 +224,57 @@ def evaluate_case(client, judge_template: str, case: dict,
             pass  # fall through to deterministic
 
     # ── Deterministic fallback ────────────────────────────────────────────────
-    pred_lower = predicted_answer.lower()
+    # Normalize both sides: NFKC Unicode + collapse whitespace to catch
+    # fancy punctuation (narrow non-breaking spaces, en-dashes, etc.) that
+    # LLMs inject but raw string compare misses.
+    pred_norm = _normalize(predicted_answer)
     refusal_phrases = [
         "could not find", "not in the corpus", "no such", "not exist",
-        "no apex", "no amendments", "no separate",
+        "no apex", "no amendments", "no separate", "refusal",
+        "there is no", "does not exist",
     ]
 
     if case.get("refusal_expected"):
-        passed = any(p in pred_lower for p in refusal_phrases)
+        passed = any(p in pred_norm for p in refusal_phrases)
         error  = None if passed else "fail_false_refusal"
     else:
+        import re
+
+        def _strip_parens(text: str) -> str:
+            """Remove parentheses/commas then re-collapse whitespace."""
+            return re.sub(r"\s+", " ", re.sub(r"[(),]", " ", text)).strip()
+
+        def _value_in_pred(val: str, pn: str) -> bool:
+            """Check if val appears in pn, tolerating paren/space/percent variants."""
+            vn = _normalize(val)
+            if vn in pn:
+                return True
+            # Try with parens stripped (e.g. "(72) hours" → "72 hours")
+            if vn in _strip_parens(pn):
+                return True
+            # Try removing spaces around percent ("99.9 %" → "99.9%")
+            pct_norm = re.sub(r"\s*%", "%", pn)
+            if vn in pct_norm:
+                return True
+            return False
+
         expected_values = case.get("expected_values", [])
         if expected_values:
-            passed = all(v.lower() in pred_lower for v in expected_values)
+            passed = all(_value_in_pred(v, pred_norm) for v in expected_values)
         else:
-            passed = case["expected_answer"].lower() in pred_lower
+            passed = _normalize(case["expected_answer"]) in pred_norm
         if not passed:
-            # Classify failure type
-            sup = (case.get("superseded_value") or "").lower()
-            dis = (case.get("distractor_value") or "").lower()
-            if sup and any(w in pred_lower for w in sup.split() if len(w) > 3):
+            # Classify failure type: require the NUMERIC token from superseded/distractor
+            # (not just any 4+ char word like "days") to avoid false positives.
+            def _has_numeric_overlap(ref: str, pn: str) -> bool:
+                nums = re.findall(r"\d[\d,\.]*", ref)
+                return bool(nums) and any(n in pn for n in nums)
+
+            sup = _normalize(case.get("superseded_value") or "")
+            dis = _normalize(case.get("distractor_value") or "")
+            if sup and _has_numeric_overlap(sup, pred_norm):
                 error = "fail_wrong_version"
-            elif dis and any(w in pred_lower for w in dis.split() if len(w) > 3):
+            elif dis and _has_numeric_overlap(dis, pred_norm):
                 error = "fail_wrong_counterparty"
             else:
                 error = "fail_hallucination"

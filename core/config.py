@@ -10,8 +10,8 @@ CHUNK_OVERLAP_TOKENS = 150
 
 # Retrieval
 TOP_K          = 5
-RETRIEVAL_K    = 50     # candidates from each search method (Stage 1: RRF fusion)
-FINAL_K        = 6      # chunks kept after cross-encoder reranking (Stage 4)
+RETRIEVAL_K    = 80     # candidates from each search method (Stage 1: RRF fusion)
+FINAL_K        = 8      # chunks kept after cross-encoder reranking (Stage 4)
 COLLECTION_NAME = "legal_contracts"
 
 # BM25 & Hybrid Search
