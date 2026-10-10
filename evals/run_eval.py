@@ -148,9 +148,38 @@ def load_predictions(dataset: list) -> dict:
                 continue
 
     missing = [c["id"] for c in dataset if c["id"] not in predictions]
-    if missing:
-        print(f"Missing predictions for {len(missing)} case(s). Recomputing...")
-        return run_pipeline_predictions(dataset)
+    error_ids = [cid for cid, p in predictions.items()
+                 if p.get("prediction", "").startswith("Error:")]
+    to_rerun = list(dict.fromkeys(missing + error_ids))  # preserve order, dedupe
+
+    if to_rerun:
+        print(f"Regenerating {len(to_rerun)} case(s): {', '.join(to_rerun)}")
+        import time
+        ensure_index_built()
+        dataset_map = {c["id"]: c for c in dataset}
+        for i, cid in enumerate(to_rerun):
+            case = dataset_map[cid]
+            if answer_question:
+                try:
+                    res    = answer_question(case["question"])
+                    answer = res.get("answer", "")
+                except Exception as e:
+                    answer = f"Error: {e}"
+            else:
+                answer = "Pipeline unavailable."
+            predictions[cid] = {"question": case["question"], "prediction": answer}
+            print(f"  [{i+1}/{len(to_rerun)}] {cid} done")
+            if i < len(to_rerun) - 1:
+                time.sleep(180)
+
+        with open(PREDICTION_PATH, "w", encoding="utf-8") as fh:
+            for cid, pdata in predictions.items():
+                fh.write(json.dumps({
+                    "id": cid,
+                    "question": pdata["question"],
+                    "predicted_answer": pdata["prediction"],
+                }, ensure_ascii=False) + "\n")
+        print(f"Updated predictions saved to {PREDICTION_PATH}")
 
     return predictions
 
