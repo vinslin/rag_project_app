@@ -5,7 +5,7 @@ import time
 from core import config
 from retrieval.vector_store import retrieve, get_collection
 from generation.prompts import SYSTEM_PROMPT, PROMPT_VERSION
-from week7.llm_client import get_client, groq_call_with_retry
+from generation.llm_client import get_client, groq_call_with_retry
 
 client = get_client()
 

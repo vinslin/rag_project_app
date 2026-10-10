@@ -1,9 +1,4 @@
-"""Shared Groq LLM client: chat-completion call with retry, and a converter
-from the project's Gemini-style tool declarations (TOOL_DECLARATIONS in
-week7/tools.py) to Groq/OpenAI-style tool schemas.
-
-Replaces the earlier Gemini (google-genai) client used across week7/week8.
-"""
+"""Groq LLM client: chat-completion call with retry."""
 
 import os
 import re
@@ -17,36 +12,6 @@ load_dotenv()
 
 def get_client() -> Groq:
     return Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-
-def to_groq_tools(declarations: list[dict]) -> list[dict]:
-    """Convert Gemini-style function declarations (type: OBJECT/STRING, ...)
-    into Groq/OpenAI-style {"type": "function", "function": {...}} tools."""
-
-    def _lower_types(node):
-        if isinstance(node, dict):
-            out = {}
-            for k, v in node.items():
-                if k == "type" and isinstance(v, str):
-                    out[k] = v.lower()
-                else:
-                    out[k] = _lower_types(v)
-            return out
-        if isinstance(node, list):
-            return [_lower_types(v) for v in node]
-        return node
-
-    tools = []
-    for decl in declarations:
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": decl["name"],
-                "description": decl["description"],
-                "parameters": _lower_types(decl["parameters"]),
-            },
-        })
-    return tools
 
 
 def groq_call_with_retry(client, *, model, messages, tools=None,
