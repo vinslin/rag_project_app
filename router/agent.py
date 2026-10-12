@@ -158,8 +158,17 @@ def _llm_call(
             return response
         except Exception as exc:
             err = str(exc)
-            retryable = any(c in err for c in ("429", "500", "502", "503", "504"))
+            is_parse_fail = "output_parse_failed" in err
+            retryable = is_parse_fail or any(c in err for c in ("429", "500", "502", "503", "504"))
             if not retryable or attempt == max_retries:
+                if is_parse_fail and tools:
+                    # Transient Groq parse glitch — fall back to plain text so the loop
+                    # gets a usable response rather than crashing.
+                    logger.warning("output_parse_failed after %d attempt(s) — retrying without tools", attempt)
+                    fallback = client.chat.completions.create(model=MODEL, messages=messages)
+                    if _acc is not None:
+                        _acc.add(fallback)
+                    return fallback
                 raise
             wait = base_delay * (2 ** (attempt - 1))
             logger.warning("LLM retry %d/%d in %.1fs — %s", attempt, max_retries, wait, exc)
