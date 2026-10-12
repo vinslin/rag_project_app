@@ -13,7 +13,7 @@ from core import config
 from generation.generator import get_generator
 from generation.prompts import PROMPT_VERSION
 from guardrails.checker import screen_query
-from obs.request_logger import log_request
+from core.request_logger import log_request
 
 
 def _detect_metadata_filter(query: str) -> dict | None:

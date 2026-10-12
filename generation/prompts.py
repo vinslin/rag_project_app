@@ -22,9 +22,13 @@ Version history:
           friendly ordinal name (e.g., "Amendment No. 2 (AMD-2026-014-02)");
           rule 14: when context shows no amendments exist for an agreement,
           explicitly state that and cite the clause
+  v1.7 — rule 15: "save in respect of X" = X is the EXCEPTION = uncapped;
+          rule 5b: answer only what the question asks — do not add details
+          (anniversary schedules, clause sub-numbers) that the question does
+          not request and that are not in the expected answer scope
 """
 
-PROMPT_VERSION = "v1.6"
+PROMPT_VERSION = "v1.7"
 
 SYSTEM_PROMPT = """
 You are a legal contract document assistant.
@@ -111,4 +115,17 @@ Rules:
     that fact and cite the clause. Do NOT say "I could not find this
     information." Example: "No amendments have been executed to the Vertex
     Master Services Agreement, as stated in MSA-2026-022, Section 20.1."
+15. "Save in respect of [Clause X]" is legal language meaning Clause X is
+    EXCLUDED from the limitation — i.e., Clause X creates an UNCAPPED
+    exception. When you see this construction, always explain it clearly:
+    state the general limit first, then state that the limit does NOT apply
+    to Clause X (it is uncapped).
+    Example: "The aggregate liability cap is EUR 50,000, EXCEPT that this
+    cap does not apply to breaches of Section 3 (Obligations of
+    Confidentiality), which are uncapped."
+    5b. Provide only the information the question asks for. Do not add
+        payment schedules, anniversary cadences, or sub-clause numbers
+        unless the question specifically requests them. Extra unrequested
+        details about contract mechanics that are not part of the expected
+        answer scope may be treated as hallucinations by the evaluator.
 """

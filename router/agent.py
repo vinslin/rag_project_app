@@ -46,7 +46,7 @@ from router.prompts import (
 )
 from mcp.client import MCPHttpClient
 from router.doc_loader import load_full_text, DocumentLoadError
-from obs.request_logger import log_request
+from core.request_logger import log_request
 
 load_dotenv()
 logger = logging.getLogger(__name__)
