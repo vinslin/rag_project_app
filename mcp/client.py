@@ -15,8 +15,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
-from dataclasses import dataclass
-from typing import Any
+# from dataclasses import dataclass  # unused — typed dataclasses below are commented out
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -59,41 +58,42 @@ def _parse_sse(raw: str) -> dict:
     raise ValueError(f"No SSE data line found in MCP response: {raw!r}")
 
 
-# ── Typed response dataclasses ────────────────────────────────────────────────
-
-@dataclass
-class ContractTemplate:
-    template_id: int
-    template_code: str
-    template_name: str
-    version: str
-    description: str
-    effective_date: str
-
-
-@dataclass
-class ContractSection:
-    section_code: str
-    section_name: str
-    order: int
-    required: bool
-    description: str
-
-
-@dataclass
-class RequiredClause:
-    clause_code: str
-    clause_name: str
-    required: bool
-    description: str
-
-
-@dataclass
-class ClauseRequirement:
-    requirement_code: str
-    name: str
-    description: str
-    mandatory: bool
+# ── Typed response dataclasses (unused — router uses dispatch() dynamically) ──
+#
+# These were hardcoded to specific MCP server field names (e.g. data["templateId"]).
+# Any server-side schema change breaks them with a KeyError.
+# The router only calls is_available(), to_groq_tools(), and dispatch() — never these.
+#
+# @dataclass
+# class ContractTemplate:
+#     template_id: int
+#     template_code: str
+#     template_name: str
+#     version: str
+#     description: str
+#     effective_date: str
+#
+# @dataclass
+# class ContractSection:
+#     section_code: str
+#     section_name: str
+#     order: int
+#     required: bool
+#     description: str
+#
+# @dataclass
+# class RequiredClause:
+#     clause_code: str
+#     clause_name: str
+#     required: bool
+#     description: str
+#
+# @dataclass
+# class ClauseRequirement:
+#     requirement_code: str
+#     name: str
+#     description: str
+#     mandatory: bool
 
 
 # ── Client ────────────────────────────────────────────────────────────────────
@@ -126,12 +126,13 @@ class MCPHttpClient:
             raise MCPClientError(f"Tool '{name}' returned no text content.")
         return "\n".join(parts)
 
-    def _call_tool_json(self, name: str, arguments: dict) -> Any:
-        raw = self.call_tool(name, arguments)
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise MCPClientError(f"Tool '{name}' returned non-JSON: {raw!r}") from exc
+    # _call_tool_json: only used by the commented-out typed methods below — not needed.
+    # def _call_tool_json(self, name: str, arguments: dict) -> Any:
+    #     raw = self.call_tool(name, arguments)
+    #     try:
+    #         return json.loads(raw)
+    #     except json.JSONDecodeError as exc:
+    #         raise MCPClientError(f"Tool '{name}' returned non-JSON: {raw!r}") from exc
 
     def is_available(self) -> bool:
         """Return True if the MCP server responds to an initialize handshake."""
@@ -146,56 +147,58 @@ class MCPHttpClient:
             logger.warning("MCP server unavailable: %s", exc)
             return False
 
-    def get_latest_template(self) -> ContractTemplate:
-        data = self._call_tool_json("get_latest_contract_template", {})
-        return ContractTemplate(
-            template_id=data["templateId"],
-            template_code=data["templateCode"],
-            template_name=data["templateName"],
-            version=data["version"],
-            description=data["description"],
-            effective_date=data["effectiveDate"],
-        )
-
-    def get_contract_structure(self, template_id: int = 1) -> list[ContractSection]:
-        data = self._call_tool_json("get_contract_structure", {"templateId": template_id})
-        return [
-            ContractSection(
-                section_code=s["sectionCode"],
-                section_name=s["sectionName"],
-                order=s["order"],
-                required=s["required"],
-                description=s["description"],
-            )
-            for s in data.get("sections", [])
-        ]
-
-    def get_required_clauses(self, template_id: int = 1) -> list[RequiredClause]:
-        data = self._call_tool_json("get_required_clauses", {"templateId": template_id})
-        return [
-            RequiredClause(
-                clause_code=c["clauseCode"],
-                clause_name=c["clauseName"],
-                required=c["required"],
-                description=c["description"],
-            )
-            for c in data.get("requiredClauses", [])
-        ]
-
-    def get_clause_requirement(self, clause_code: str, template_id: int = 1) -> list[ClauseRequirement]:
-        data = self._call_tool_json(
-            "get_clause_requirement",
-            {"templateId": template_id, "clauseCode": clause_code},
-        )
-        return [
-            ClauseRequirement(
-                requirement_code=r["requirementCode"],
-                name=r["name"],
-                description=r["description"],
-                mandatory=r["mandatory"],
-            )
-            for r in data.get("requirements", [])
-        ]
+    # ── Schema-tied methods (commented out — break when server renames fields) ──
+    #
+    # def get_latest_template(self) -> ContractTemplate:
+    #     data = self._call_tool_json("get_latest_contract_template", {})
+    #     return ContractTemplate(
+    #         template_id=data["templateId"],     # KeyError if server renames this
+    #         template_code=data["templateCode"],
+    #         template_name=data["templateName"],
+    #         version=data["version"],
+    #         description=data["description"],
+    #         effective_date=data["effectiveDate"],
+    #     )
+    #
+    # def get_contract_structure(self, template_id: int = 1) -> list[ContractSection]:
+    #     data = self._call_tool_json("get_contract_structure", {"templateId": template_id})
+    #     return [
+    #         ContractSection(
+    #             section_code=s["sectionCode"],
+    #             section_name=s["sectionName"],
+    #             order=s["order"],
+    #             required=s["required"],
+    #             description=s["description"],
+    #         )
+    #         for s in data.get("sections", [])
+    #     ]
+    #
+    # def get_required_clauses(self, template_id: int = 1) -> list[RequiredClause]:
+    #     data = self._call_tool_json("get_required_clauses", {"templateId": template_id})
+    #     return [
+    #         RequiredClause(
+    #             clause_code=c["clauseCode"],
+    #             clause_name=c["clauseName"],
+    #             required=c["required"],
+    #             description=c["description"],
+    #         )
+    #         for c in data.get("requiredClauses", [])
+    #     ]
+    #
+    # def get_clause_requirement(self, clause_code: str, template_id: int = 1) -> list[ClauseRequirement]:
+    #     data = self._call_tool_json(
+    #         "get_clause_requirement",
+    #         {"templateId": template_id, "clauseCode": clause_code},
+    #     )
+    #     return [
+    #         ClauseRequirement(
+    #             requirement_code=r["requirementCode"],
+    #             name=r["name"],
+    #             description=r["description"],
+    #             mandatory=r["mandatory"],
+    #         )
+    #         for r in data.get("requirements", [])
+    #     ]
 
     def list_tools(self) -> list[dict]:
         """Fetch the raw tool list from the MCP server via tools/list."""
