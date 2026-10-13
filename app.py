@@ -6,7 +6,6 @@ from core import config
 from ingestion.pdf_loader import load_pdf
 from ingestion.chunker import chunk_document
 from retrieval.vector_store import build_index, clear_index
-from pipeline.rag import answer_question
 from router.agent import route as router_route
 from ui.history import load_history, save_history
 from ui.renderers import render_route_badge, render_mcp_tools, render_full_doc_info, render_sources
@@ -39,40 +38,6 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("⚙️ Chunking")
-    chunk_size = st.slider("Chunk size (tokens)", 100, 1000, config.CHUNK_SIZE_TOKENS, 100)
-    overlap    = st.slider("Chunk overlap (tokens)", 0, 300, config.CHUNK_OVERLAP_TOKENS, 50)
-
-    st.divider()
-    st.subheader("🔍 Retrieval")
-    search_mode = st.radio(
-        "Search Mode",
-        options=["hybrid", "vector", "bm25"],
-        format_func=lambda x: {
-            "hybrid": "🔀 Hybrid (RRF Fusion)",
-            "vector": "🧠 Vector Only",
-            "bm25":   "🔤 BM25 Only",
-        }[x],
-        index=0,
-    )
-    retrieval_k = st.slider("Retrieval K (candidates)", 10, 100, config.RETRIEVAL_K, 10)
-    mmr_k       = st.slider("MMR K (diverse chunks)",   5,  50,  config.MMR_K,       5)
-    mmr_lambda  = st.slider("MMR Lambda (λ)",           0.0, 1.0, config.MMR_LAMBDA, 0.1)
-    final_k     = st.slider("Final K (after reranking)", 1, 10,  config.FINAL_K)
-
-    st.divider()
-    st.subheader("🤖 Router Agent")
-    use_router = st.toggle(
-        "Enable Router Agent (RAG + MCP)",
-        value=True,
-        help=(
-            "When ON, the router classifies each query and answers from "
-            "contract documents (RAG), company standards (MCP), or both. "
-            "When OFF, only the RAG pipeline is used."
-        ),
-    )
-
-    st.divider()
     col_build, col_clear = st.columns(2)
     with col_build:
         build_button = st.button("🔨 Build Index", use_container_width=True)
@@ -90,8 +55,6 @@ with st.sidebar:
 if build_button:
     if not uploaded_files:
         st.sidebar.warning("Please upload at least one PDF.")
-    elif overlap >= chunk_size:
-        st.sidebar.error("Overlap must be smaller than chunk size.")
     else:
         with st.sidebar, st.spinner("Building index…"):
             all_chunks = []
@@ -110,7 +73,7 @@ if build_button:
                 )
 
                 for page in pages:
-                    chunks = chunk_document(page["text"], chunk_size, overlap)
+                    chunks = chunk_document(page["text"], config.CHUNK_SIZE_TOKENS, config.CHUNK_OVERLAP_TOKENS)
                     build_index(chunks, config.COLLECTION_NAME, source=page["source"], page=page["page"])
                     all_chunks.extend(chunks)
 
@@ -172,24 +135,21 @@ if prompt := st.chat_input("Ask about your contracts…"):
             ]
 
             rag_kwargs = dict(
-                search_mode=search_mode,
+                search_mode="hybrid",
                 conversation_history=llm_history,
-                retrieval_k=retrieval_k,
-                mmr_k=mmr_k,
-                mmr_lambda=mmr_lambda,
-                final_k=final_k,
+                retrieval_k=config.RETRIEVAL_K,
+                mmr_k=config.MMR_K,
+                mmr_lambda=config.MMR_LAMBDA,
+                final_k=config.FINAL_K,
             )
 
             with st.spinner("Thinking…"):
-                if use_router:
-                    result = router_route(
-                        prompt,
-                        full_doc_texts=st.session_state.get("full_doc_texts") or None,
-                        **rag_kwargs,
-                    )
-                    response = result.to_dict() if hasattr(result, "to_dict") else result
-                else:
-                    response = answer_question(prompt, **rag_kwargs)
+                result = router_route(
+                    prompt,
+                    full_doc_texts=st.session_state.get("full_doc_texts") or None,
+                    **rag_kwargs,
+                )
+                response = result.to_dict() if hasattr(result, "to_dict") else result
 
             if response.get("out_of_scope"):
                 reply = f"🛡️ {response['answer']}"
