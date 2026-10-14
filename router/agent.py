@@ -24,13 +24,14 @@ import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 from groq import Groq
-from dotenv import load_dotenv
 
 from core import config
+from core.logging_setup import set_trace_id
 from generation.prompts import PROMPT_VERSION
 from pipeline.rag import answer_question
 from router.classifier import QueryClassifier, Route
@@ -48,7 +49,6 @@ from mcp.client import MCPHttpClient
 from router.doc_loader import load_full_text, DocumentLoadError
 from core.request_logger import log_request
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
 MODEL = config.GENERATION_MODEL
@@ -359,10 +359,11 @@ def _handle_mcp(
     query: str,
     route_reason: str,
     _acc: _UsageAccum,
+    _tools_acc: _UsageAccum | None = None,
 ) -> RouteResult:
     logger.info("[Router] MCP path: %r", query[:80])
     t0 = time.perf_counter()
-    answer, tools_called = _run_mcp_loop(client, mcp, query, groq_tools, _acc=_acc)
+    answer, tools_called = _run_mcp_loop(client, mcp, query, groq_tools, _acc=_tools_acc or _acc)
     generation_ms = (time.perf_counter() - t0) * 1000
 
     return RouteResult(
@@ -384,6 +385,7 @@ def _handle_both(
     query: str,
     route_reason: str,
     _acc: _UsageAccum,
+    _tools_acc: _UsageAccum | None = None,
     **rag_kwargs,
 ) -> RouteResult:
     logger.info("[Router] BOTH path: %r", query[:80])
@@ -408,7 +410,7 @@ def _handle_both(
     rag_answer = rag_result.get("answer", "No relevant content found in the documents.")
 
     mcp_query = f"What do the company standards require regarding: {query}"
-    mcp_answer, tools_called = _run_mcp_loop(client, mcp, mcp_query, groq_tools, _acc=_acc)
+    mcp_answer, tools_called = _run_mcp_loop(client, mcp, mcp_query, groq_tools, _acc=_tools_acc or _acc)
 
     synthesis = _llm_call(
         client,
@@ -502,6 +504,7 @@ def _handle_full_doc_mcp(
     route_reason: str,
     full_doc_texts: dict[str, str] | None,
     _acc: _UsageAccum,
+    _tools_acc: _UsageAccum | None = None,
 ) -> RouteResult:
     """Load the full document AND fetch ALL MCP standards → compliance report."""
     logger.info("[Router] FULL_DOC_MCP path: %r", query[:80])
@@ -523,7 +526,7 @@ def _handle_full_doc_mcp(
 
     t0 = time.perf_counter()
 
-    standards_text, tools_called = _fetch_all_mcp_standards(client, mcp, groq_tools, _acc=_acc)
+    standards_text, tools_called = _fetch_all_mcp_standards(client, mcp, groq_tools, _acc=_tools_acc or _acc)
     logger.info("[Router] MCP standards fetched via %d tool call(s)", len(tools_called))
 
     if doc.estimated_tokens <= _SINGLE_PASS_TOKEN_LIMIT:
@@ -607,11 +610,15 @@ def route(
     retrieval LLM, synthesis LLM, MCP tool-calling loop, etc.).
     """
     t_route_start = time.perf_counter()
-    _acc = _UsageAccum()
+    _acc       = _UsageAccum()   # generation / synthesis tokens
+    _tools_acc = _UsageAccum()   # MCP tool-calling loop tokens (tracked separately)
+
+    trace_id = str(uuid.uuid4())
+    set_trace_id(trace_id)       # all logger.* calls in this request carry trace_id
 
     try:
         # ── Classify ──────────────────────────────────────────────────────────
-        classification = _classifier.classify(query)
+        classification = _classifier.classify(query, trace_id=trace_id)
         client = _get_client()
         r = classification.route
 
@@ -638,13 +645,13 @@ def route(
             groq_tools = _get_groq_tools() if mcp_needed else []
 
             if r == Route.MCP:
-                result = _handle_mcp(client, _mcp_client, groq_tools, query, classification.reason, _acc)
+                result = _handle_mcp(client, _mcp_client, groq_tools, query, classification.reason, _acc, _tools_acc)
             elif r == Route.BOTH:
-                result = _handle_both(client, _mcp_client, groq_tools, query, classification.reason, _acc, **rag_kwargs)
+                result = _handle_both(client, _mcp_client, groq_tools, query, classification.reason, _acc, _tools_acc, **rag_kwargs)
             elif r == Route.FULL_DOC:
                 result = _handle_full_doc(client, query, classification.reason, full_doc_texts, _acc)
             elif r == Route.FULL_DOC_MCP:
-                result = _handle_full_doc_mcp(client, _mcp_client, groq_tools, query, classification.reason, full_doc_texts, _acc)
+                result = _handle_full_doc_mcp(client, _mcp_client, groq_tools, query, classification.reason, full_doc_texts, _acc, _tools_acc)
             else:
                 result = _handle_rag(query, classification.reason, _acc, **rag_kwargs)
 
@@ -669,6 +676,7 @@ def route(
 
     # ── Log every route — single log point for all router paths ───────────
     log_request(
+        trace_id=trace_id,
         query=query,
         answer=result.answer,
         route=str(result.route),
@@ -677,6 +685,8 @@ def route(
         spans_ms=result.spans_ms,
         input_tokens=_acc.input_tokens,
         output_tokens=_acc.output_tokens,
+        tools_input_tokens=_tools_acc.input_tokens,
+        tools_output_tokens=_tools_acc.output_tokens,
         mcp_tools_called=[t.name for t in result.mcp_tools_called],
         classifier_decision=classifier_decision,
         out_of_scope=result.out_of_scope,

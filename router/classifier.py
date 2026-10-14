@@ -29,22 +29,28 @@ from enum import Enum
 from pathlib import Path
 
 from groq import Groq
-from dotenv import load_dotenv
 
 from core import config
+from core.request_logger import _rotate_if_needed
 from router.prompts import CLASSIFY_SYSTEM, CLASSIFIER_PROMPT_VERSION
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
 _CLASSIFY_LOG = Path(__file__).parent.parent / "data" / "logs" / "classifications.jsonl"
+_CLASSIFY_LOG.parent.mkdir(parents=True, exist_ok=True)
 
 
-def _log_classification(query: str, route: str, reason: str, latency_ms: float) -> None:
+def _log_classification(
+    query: str,
+    route: str,
+    reason: str,
+    latency_ms: float,
+    trace_id: str | None = None,
+) -> None:
     """Append one classification decision to classifications.jsonl."""
-    _CLASSIFY_LOG.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_if_needed(_CLASSIFY_LOG)
     record = {
-        "trace_id":                  str(uuid.uuid4()),
+        "trace_id":                  trace_id or str(uuid.uuid4()),
         "timestamp":                 datetime.now(timezone.utc).isoformat(),
         "classifier_prompt_version": CLASSIFIER_PROMPT_VERSION,
         "query":                     query,
@@ -79,11 +85,12 @@ class QueryClassifier:
         self._model = model or config.GENERATION_MODEL
         self._max_retries = max_retries
 
-    def classify(self, query: str) -> Classification:
+    def classify(self, query: str, trace_id: str | None = None) -> Classification:
         """Return a Classification for the given query.
 
         Falls back to Route.RAG if the LLM response cannot be parsed.
         Each decision is written to data/logs/classifications.jsonl.
+        ``trace_id`` links this record to the matching requests.jsonl entry.
         """
         prompt = f"Query: {query}"
         t_start = time.perf_counter()
@@ -104,6 +111,7 @@ class QueryClassifier:
                     route=str(result.route),
                     reason=result.reason,
                     latency_ms=(time.perf_counter() - t_start) * 1000,
+                    trace_id=trace_id,
                 )
                 return result
 
@@ -129,6 +137,7 @@ class QueryClassifier:
             route=str(fallback.route),
             reason=fallback.reason,
             latency_ms=(time.perf_counter() - t_start) * 1000,
+            trace_id=trace_id,
         )
         return fallback
 

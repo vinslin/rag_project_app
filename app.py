@@ -1,5 +1,11 @@
 import os
 
+from dotenv import load_dotenv
+load_dotenv()
+
+from core.logging_setup import configure_logging
+configure_logging()
+
 import streamlit as st
 
 from core import config
