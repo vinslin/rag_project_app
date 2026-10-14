@@ -159,16 +159,26 @@ def _llm_call(
         except Exception as exc:
             err = str(exc)
             is_parse_fail = "output_parse_failed" in err
-            retryable = is_parse_fail or any(c in err for c in ("429", "500", "502", "503", "504"))
-            if not retryable or attempt == max_retries:
-                if is_parse_fail and tools:
-                    # Transient Groq parse glitch — fall back to plain text so the loop
-                    # gets a usable response rather than crashing.
-                    logger.warning("output_parse_failed after %d attempt(s) — retrying without tools", attempt)
-                    fallback = client.chat.completions.create(model=MODEL, messages=messages)
+            # output_parse_failed means the model generated empty/unparseable output.
+            # Retrying with identical messages never helps — go straight to fallback.
+            # Only rate-limit and server errors are worth retrying.
+            retryable = not is_parse_fail and any(c in err for c in ("429", "500", "502", "503", "504"))
+            if is_parse_fail and tools:
+                logger.warning("output_parse_failed on attempt %d — forcing text response with tool_choice=none", attempt)
+                try:
+                    fallback = client.chat.completions.create(
+                        model=MODEL,
+                        messages=messages,
+                        tools=tools,
+                        tool_choice="none",
+                    )
                     if _acc is not None:
                         _acc.add(fallback)
                     return fallback
+                except Exception as fallback_exc:
+                    logger.error("Fallback LLM call also failed: %s", fallback_exc)
+                    raise
+            if not retryable or attempt == max_retries:
                 raise
             wait = base_delay * (2 ** (attempt - 1))
             logger.warning("LLM retry %d/%d in %.1fs — %s", attempt, max_retries, wait, exc)
@@ -226,7 +236,7 @@ def _run_mcp_loop(
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
 
     logger.warning("MCP loop reached max_iters without a final answer")
-    return "[Max iterations reached without a final answer]", tools_called
+    return "The request took longer than expected. Please try again in a moment.", tools_called
 
 
 def _fetch_all_mcp_standards(
@@ -237,10 +247,10 @@ def _fetch_all_mcp_standards(
 ) -> tuple[str, list[ToolCall]]:
     """Fetch the complete MCP standards in a single tool-calling pass."""
     query = (
-        "Retrieve ALL company contract standards in full detail: "
-        "the active template, the required document sections in order, "
-        "all required clause codes, and the detailed requirements for "
-        "EVERY required clause. Call all necessary tools."
+        "Retrieve the complete company contract standards step by step: "
+        "start with the active template, then the required document sections, "
+        "then the required clause codes, then the detailed requirements for each clause. "
+        "Work through these one tool call at a time until you have the full picture."
     )
     return _run_mcp_loop(client, mcp, query, groq_tools, max_iters=12, _acc=_acc)
 
@@ -451,8 +461,9 @@ def _handle_full_doc(
     try:
         doc = load_full_text(full_doc_texts)
     except DocumentLoadError as exc:
+        logger.error("[Router] Full doc load failed: %s", exc)
         return RouteResult(
-            answer=str(exc),
+            answer="Unable to load the document right now. Please try again in a moment.",
             route=Route.FULL_DOC,
             route_reason=route_reason,
             reasoning="Document load failed.",
@@ -498,8 +509,9 @@ def _handle_full_doc_mcp(
     try:
         doc = load_full_text(full_doc_texts)
     except DocumentLoadError as exc:
+        logger.error("[Router] Full doc MCP load failed: %s", exc)
         return RouteResult(
-            answer=str(exc),
+            answer="Unable to load the document right now. Please try again in a moment.",
             route=Route.FULL_DOC_MCP,
             route_reason=route_reason,
             reasoning="Document load failed.",
@@ -597,43 +609,57 @@ def route(
     t_route_start = time.perf_counter()
     _acc = _UsageAccum()
 
-    # ── Classify ──────────────────────────────────────────────────────────
-    classification = _classifier.classify(query)
-    client = _get_client()
-    r = classification.route
+    try:
+        # ── Classify ──────────────────────────────────────────────────────────
+        classification = _classifier.classify(query)
+        client = _get_client()
+        r = classification.route
 
-    classifier_decision = {
-        "route":                     classification.route,
-        "reason":                    classification.reason,
-        "classifier_prompt_version": CLASSIFIER_PROMPT_VERSION,
-        "agent_prompt_version":      AGENT_PROMPT_VERSION,
-    }
+        classifier_decision = {
+            "route":                     classification.route,
+            "reason":                    classification.reason,
+            "classifier_prompt_version": CLASSIFIER_PROMPT_VERSION,
+            "agent_prompt_version":      AGENT_PROMPT_VERSION,
+        }
 
-    # ── MCP-dependent routes: check server availability first ─────────────
-    mcp_needed = r in (Route.MCP, Route.BOTH, Route.FULL_DOC_MCP)
-    if mcp_needed and not _mcp_client.is_available():
-        fallback_reason = (
-            f"MCP server unavailable — fell back to "
-            f"{'RAG' if r != Route.FULL_DOC_MCP else 'full-doc only'}."
+        # ── MCP-dependent routes: check server availability first ─────────────
+        mcp_needed = r in (Route.MCP, Route.BOTH, Route.FULL_DOC_MCP)
+        if mcp_needed and not _mcp_client.is_available():
+            fallback_reason = (
+                f"MCP server unavailable — fell back to "
+                f"{'RAG' if r != Route.FULL_DOC_MCP else 'full-doc only'}."
+            )
+            logger.warning("[Router] %s", fallback_reason)
+            if r == Route.FULL_DOC_MCP:
+                result = _handle_full_doc(client, query, fallback_reason, full_doc_texts, _acc)
+            else:
+                result = _handle_rag(query, fallback_reason, _acc, **rag_kwargs)
+        else:
+            groq_tools = _get_groq_tools() if mcp_needed else []
+
+            if r == Route.MCP:
+                result = _handle_mcp(client, _mcp_client, groq_tools, query, classification.reason, _acc)
+            elif r == Route.BOTH:
+                result = _handle_both(client, _mcp_client, groq_tools, query, classification.reason, _acc, **rag_kwargs)
+            elif r == Route.FULL_DOC:
+                result = _handle_full_doc(client, query, classification.reason, full_doc_texts, _acc)
+            elif r == Route.FULL_DOC_MCP:
+                result = _handle_full_doc_mcp(client, _mcp_client, groq_tools, query, classification.reason, full_doc_texts, _acc)
+            else:
+                result = _handle_rag(query, classification.reason, _acc, **rag_kwargs)
+
+    except Exception as exc:
+        logger.exception("[Router] Unexpected error for query %r: %s", query[:80], exc)
+        total_ms = (time.perf_counter() - t_route_start) * 1000
+        return RouteResult(
+            answer="Something went wrong. Please try again in a moment.",
+            route="error",
+            route_reason="Unhandled exception in router.",
+            reasoning=str(exc),
+            confidence="low",
+            out_of_scope=False,
+            spans_ms={"retrieval": 0.0, "reranking": 0.0, "generation": round(total_ms, 1)},
         )
-        logger.warning("[Router] %s", fallback_reason)
-        if r == Route.FULL_DOC_MCP:
-            result = _handle_full_doc(client, query, fallback_reason, full_doc_texts, _acc)
-        else:
-            result = _handle_rag(query, fallback_reason, _acc, **rag_kwargs)
-    else:
-        groq_tools = _get_groq_tools() if mcp_needed else []
-
-        if r == Route.MCP:
-            result = _handle_mcp(client, _mcp_client, groq_tools, query, classification.reason, _acc)
-        elif r == Route.BOTH:
-            result = _handle_both(client, _mcp_client, groq_tools, query, classification.reason, _acc, **rag_kwargs)
-        elif r == Route.FULL_DOC:
-            result = _handle_full_doc(client, query, classification.reason, full_doc_texts, _acc)
-        elif r == Route.FULL_DOC_MCP:
-            result = _handle_full_doc_mcp(client, _mcp_client, groq_tools, query, classification.reason, full_doc_texts, _acc)
-        else:
-            result = _handle_rag(query, classification.reason, _acc, **rag_kwargs)
 
     total_route_ms = (time.perf_counter() - t_route_start) * 1000
 

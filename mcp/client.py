@@ -252,7 +252,7 @@ class MCPHttpClient:
             return self.call_tool(name, args)
         except MCPClientError as exc:
             logger.error("MCP tool '%s' failed: %s", name, exc)
-            return f"[MCP ERROR] {exc}"
+            return "The standards service is temporarily unavailable. Please try again in a moment."
 
 
 class MCPClientError(Exception):

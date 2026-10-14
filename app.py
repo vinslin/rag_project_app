@@ -56,40 +56,43 @@ if build_button:
     if not uploaded_files:
         st.sidebar.warning("Please upload at least one PDF.")
     else:
-        with st.sidebar, st.spinner("Building index…"):
-            all_chunks = []
-            clear_index(config.COLLECTION_NAME)
-            st.session_state.full_doc_texts = {}
+        try:
+            with st.sidebar, st.spinner("Building index…"):
+                all_chunks = []
+                clear_index(config.COLLECTION_NAME)
+                st.session_state.full_doc_texts = {}
 
-            for uploaded_file in uploaded_files:
-                os.makedirs("documents", exist_ok=True)
-                path = os.path.join("documents", uploaded_file.name)
-                with open(path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
+                for uploaded_file in uploaded_files:
+                    os.makedirs("documents", exist_ok=True)
+                    path = os.path.join("documents", uploaded_file.name)
+                    with open(path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
 
-                pages = load_pdf(path)
-                st.session_state.full_doc_texts[uploaded_file.name] = "\n\n".join(
-                    p["text"] for p in pages
-                )
+                    pages = load_pdf(path)
+                    st.session_state.full_doc_texts[uploaded_file.name] = "\n\n".join(
+                        p["text"] for p in pages
+                    )
 
-                for page in pages:
-                    chunks = chunk_document(page["text"], config.CHUNK_SIZE_TOKENS, config.CHUNK_OVERLAP_TOKENS)
-                    build_index(chunks, config.COLLECTION_NAME, source=page["source"], page=page["page"])
-                    all_chunks.extend(chunks)
+                    for page in pages:
+                        chunks = chunk_document(page["text"], config.CHUNK_SIZE_TOKENS, config.CHUNK_OVERLAP_TOKENS)
+                        build_index(chunks, config.COLLECTION_NAME, source=page["source"], page=page["page"])
+                        all_chunks.extend(chunks)
 
-            st.session_state.collection_name = config.COLLECTION_NAME
-            st.session_state.indexed         = True
-            st.session_state.chunk_count     = len(all_chunks)
+                st.session_state.collection_name = config.COLLECTION_NAME
+                st.session_state.indexed         = True
+                st.session_state.chunk_count     = len(all_chunks)
 
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": (
-                f"✅ Indexed **{len(all_chunks)} chunks** from "
-                f"**{len(uploaded_files)} file(s)**. "
-                "You can now ask me questions about your contracts."
-            ),
-        })
-        st.rerun()
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": (
+                    f"✅ Indexed **{len(all_chunks)} chunks** from "
+                    f"**{len(uploaded_files)} file(s)**. "
+                    "You can now ask me questions about your contracts."
+                ),
+            })
+            st.rerun()
+        except Exception:
+            st.sidebar.error("Something went wrong. Please try again in a moment.")
 
 # ── Chat area ─────────────────────────────────────────────────────────────────
 
@@ -143,26 +146,31 @@ if prompt := st.chat_input("Ask about your contracts…"):
                 final_k=config.FINAL_K,
             )
 
-            with st.spinner("Thinking…"):
-                result = router_route(
-                    prompt,
-                    full_doc_texts=st.session_state.get("full_doc_texts") or None,
-                    **rag_kwargs,
-                )
-                response = result.to_dict() if hasattr(result, "to_dict") else result
+            try:
+                with st.spinner("Thinking…"):
+                    result = router_route(
+                        prompt,
+                        full_doc_texts=st.session_state.get("full_doc_texts") or None,
+                        **rag_kwargs,
+                    )
+                    response = result.to_dict() if hasattr(result, "to_dict") else result
 
-            if response.get("out_of_scope"):
-                reply = f"🛡️ {response['answer']}"
-                st.markdown(reply)
-                st.caption(f"Reason: {response.get('reasoning', '')}")
-            else:
-                reply = response["answer"]
-                render_route_badge(response)
-                st.markdown(reply)
-                next_idx = len(st.session_state.messages)
-                st.session_state.debug_data[next_idx] = response
-                render_mcp_tools(response)
-                render_full_doc_info(response)
-                render_sources(response)
+                if response.get("out_of_scope"):
+                    reply = f"🛡️ {response['answer']}"
+                    st.markdown(reply)
+                    st.caption(f"Reason: {response.get('reasoning', '')}")
+                else:
+                    reply = response["answer"]
+                    render_route_badge(response)
+                    st.markdown(reply)
+                    next_idx = len(st.session_state.messages)
+                    st.session_state.debug_data[next_idx] = response
+                    render_mcp_tools(response)
+                    render_full_doc_info(response)
+                    render_sources(response)
 
-            st.session_state.messages.append({"role": "assistant", "content": reply})
+                st.session_state.messages.append({"role": "assistant", "content": reply})
+            except Exception:
+                reply = "Something went wrong. Please try again in a moment."
+                st.markdown(reply)
+                st.session_state.messages.append({"role": "assistant", "content": reply})

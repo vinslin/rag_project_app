@@ -16,7 +16,7 @@ Version history:
 # ── Version constants ─────────────────────────────────────────────────────
 
 CLASSIFIER_PROMPT_VERSION = "v1.0"
-AGENT_PROMPT_VERSION      = "v1.0"
+AGENT_PROMPT_VERSION      = "v1.1"
 
 
 # ── Classifier prompt ─────────────────────────────────────────────────────
@@ -79,12 +79,18 @@ Respond with ONLY a valid JSON object — no markdown, no explanation:
 
 # ── Router agent prompts ──────────────────────────────────────────────────
 
-MCP_LOOP_SYSTEM = (
-    "You are a legal contract standards advisor with access to the company's "
-    "contract standards database. Answer the user's question by calling the "
-    "relevant tools first, then give a precise, well-structured answer "
-    "based solely on what the tools return."
-)
+MCP_LOOP_SYSTEM = """\
+You are a legal contract standards advisor with access to the company's contract standards database.
+
+Tool-calling rules (follow these exactly):
+- Call ONE tool at a time. Wait for its result before deciding the next step.
+- Use the tool results to decide which tool to call next; never call a tool speculatively.
+- Stop calling tools as soon as you have enough information to fully answer the question.
+- Do NOT call the same tool with the same arguments more than once.
+
+After gathering all necessary information, respond with a precise, well-structured plain-text answer
+based solely on what the tools returned. Do not guess or add information not in the tool results.\
+"""
 
 CLAUSE_SYNTHESIS_SYSTEM = (
     "You are a legal contract compliance analyst. "

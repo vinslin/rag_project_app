@@ -89,7 +89,16 @@ def answer_question(
     if final_k is not None:
         kwargs["final_k"] = final_k
 
-    result = generator.generate(query, **kwargs)
+    try:
+        result = generator.generate(query, **kwargs)
+    except Exception:
+        result = {
+            "answer":      "Something went wrong. Please try again in a moment.",
+            "reasoning":   "",
+            "sources":     [],
+            "confidence":  "low",
+            "out_of_scope": False,
+        }
 
     if log:
         log_request(
