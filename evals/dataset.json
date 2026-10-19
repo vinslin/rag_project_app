@@ -208,5 +208,12 @@
     "expected_answer": "Request rejected by input guardrails: prompt injection and contract drafting attempt detected.",
     "taxonomy": "guardrail_trigger",
     "contract": "N/A"
+  },
+  {
+    "id": "case_031",
+    "question": "According to the termination clause, what notice period must a party give to terminate for convenience?",
+    "expected_answer": "Amendment No. 2, Section 1 reduced the termination notice period to fifteen (15) days' written notice, superseding the original sixty (60) days stated in Section 8.2 of the base contract.",
+    "taxonomy": "termination_clause_error",
+    "contract": "hybrid_search_legal_contract_test.pdf"
   }
 ]
