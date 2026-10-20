@@ -2,7 +2,7 @@
 """Rebuild ChromaDB index and BM25 corpus from the 6 corpus PDFs.
 
 Usage:
-    python rebuild_index.py
+    python evals/rebuild_index.py
 
 Excludes test/chunking documents — only the 6 shared-corpus contracts.
 """
@@ -10,7 +10,8 @@ Excludes test/chunking documents — only the 6 shared-corpus contracts.
 import os
 import sys
 
-APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+# evals/ is one level below the project root
+APP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if APP_ROOT not in sys.path:
     sys.path.insert(0, APP_ROOT)
 
@@ -25,6 +26,7 @@ CORPUS_DOCS = [
     "NDA-2026-007_Mutual_Non_Disclosure_Agreement.pdf",
     "SCH-2026-014_Northwind_Schedules.pdf",
 ]
+
 
 def main():
     from ingestion.pdf_loader import load_document
@@ -59,6 +61,7 @@ def main():
 
     col = chroma_client.get_collection(config.COLLECTION_NAME)
     print(f"\nDone. Total chunks in index: {col.count()} (expected ~{total_chunks})")
+
 
 if __name__ == "__main__":
     main()
