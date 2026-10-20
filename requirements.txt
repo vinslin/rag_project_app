@@ -7,3 +7,4 @@ sentence-transformers
 rank-bm25
 groq
 mcp<2
+python-json-logger>=2.0.7
