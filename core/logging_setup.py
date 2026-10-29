@@ -29,7 +29,10 @@ import logging.handlers
 from contextvars import ContextVar
 from pathlib import Path
 
-from pythonjsonlogger import jsonlogger
+try:
+    from pythonjsonlogger.jsonlogger import JsonFormatter as _JsonFormatter  # v2
+except ImportError:
+    from pythonjsonlogger import JsonFormatter as _JsonFormatter  # v4+
 
 LOG_DIR    = Path(__file__).parent.parent / "data" / "logs"
 _APP_LOG   = LOG_DIR / "app.jsonl"
@@ -67,7 +70,7 @@ def configure_logging(level: int = logging.INFO) -> None:
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    json_fmt = jsonlogger.JsonFormatter(
+    json_fmt = _JsonFormatter(
         fmt="%(asctime)s %(levelname)s %(name)s %(message)s %(trace_id)s",
         datefmt="%Y-%m-%dT%H:%M:%SZ",
         rename_fields={
