@@ -13,8 +13,6 @@ from ingestion.pdf_loader import load_pdf
 from ingestion.chunker import chunk_document
 from retrieval.vector_store import build_index, clear_index
 from router.agent import route as router_route
-from ui.history import load_history, save_history
-from ui.renderers import render_route_badge, render_mcp_tools, render_full_doc_info, render_sources
 
 st.set_page_config(
     page_title="Legal Contract Intelligence",
@@ -30,6 +28,8 @@ if "debug_data" not in st.session_state:
     st.session_state.debug_data = {}
 if "full_doc_texts" not in st.session_state:
     st.session_state.full_doc_texts = {}
+if "last_uploaded_names" not in st.session_state:
+    st.session_state.last_uploaded_names = []
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
@@ -44,61 +44,56 @@ with st.sidebar:
     )
 
     st.divider()
-    col_build, col_clear = st.columns(2)
-    with col_build:
-        build_button = st.button("🔨 Build Index", use_container_width=True)
-    with col_clear:
-        if st.button("🗑️ Clear Chat", use_container_width=True):
-            st.session_state.messages   = []
-            st.session_state.debug_data = {}
-            st.rerun()
+    if st.button("🗑️ Clear Chat", use_container_width=True):
+        st.session_state.messages   = []
+        st.session_state.debug_data = {}
+        st.rerun()
 
     if st.session_state.get("indexed"):
         st.success(f"✅ {st.session_state.chunk_count} chunks indexed")
 
-# ── Index building ────────────────────────────────────────────────────────────
+# ── Auto index building when files change ─────────────────────────────────────
 
-if build_button:
-    if not uploaded_files:
-        st.sidebar.warning("Please upload at least one PDF.")
-    else:
-        try:
-            with st.sidebar, st.spinner("Building index…"):
-                all_chunks = []
-                clear_index(config.COLLECTION_NAME)
-                st.session_state.full_doc_texts = {}
+current_names = sorted(f.name for f in uploaded_files) if uploaded_files else []
+if current_names and current_names != st.session_state.last_uploaded_names:
+    st.session_state.last_uploaded_names = current_names
+    try:
+        with st.sidebar, st.spinner("Building index…"):
+            all_chunks = []
+            clear_index(config.COLLECTION_NAME)
+            st.session_state.full_doc_texts = {}
 
-                for uploaded_file in uploaded_files:
-                    os.makedirs("documents", exist_ok=True)
-                    path = os.path.join("documents", uploaded_file.name)
-                    with open(path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
+            for uploaded_file in uploaded_files:
+                os.makedirs("documents", exist_ok=True)
+                path = os.path.join("documents", uploaded_file.name)
+                with open(path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
 
-                    pages = load_pdf(path)
-                    st.session_state.full_doc_texts[uploaded_file.name] = "\n\n".join(
-                        p["text"] for p in pages
-                    )
+                pages = load_pdf(path)
+                st.session_state.full_doc_texts[uploaded_file.name] = "\n\n".join(
+                    p["text"] for p in pages
+                )
 
-                    for page in pages:
-                        chunks = chunk_document(page["text"], config.CHUNK_SIZE_TOKENS, config.CHUNK_OVERLAP_TOKENS)
-                        build_index(chunks, config.COLLECTION_NAME, source=page["source"], page=page["page"])
-                        all_chunks.extend(chunks)
+                for page in pages:
+                    chunks = chunk_document(page["text"], config.CHUNK_SIZE_TOKENS, config.CHUNK_OVERLAP_TOKENS)
+                    build_index(chunks, config.COLLECTION_NAME, source=page["source"], page=page["page"])
+                    all_chunks.extend(chunks)
 
-                st.session_state.collection_name = config.COLLECTION_NAME
-                st.session_state.indexed         = True
-                st.session_state.chunk_count     = len(all_chunks)
+            st.session_state.collection_name = config.COLLECTION_NAME
+            st.session_state.indexed         = True
+            st.session_state.chunk_count     = len(all_chunks)
 
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": (
-                    f"✅ Indexed **{len(all_chunks)} chunks** from "
-                    f"**{len(uploaded_files)} file(s)**. "
-                    "You can now ask me questions about your contracts."
-                ),
-            })
-            st.rerun()
-        except Exception:
-            st.sidebar.error("Something went wrong. Please try again in a moment.")
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": (
+                f"✅ Indexed **{len(all_chunks)} chunks** from "
+                f"**{len(uploaded_files)} file(s)**. "
+                "You can now ask me questions about your contracts."
+            ),
+        })
+        st.rerun()
+    except Exception:
+        st.sidebar.error("Something went wrong. Please try again in a moment.")
 
 # ── Chat area ─────────────────────────────────────────────────────────────────
 
@@ -108,19 +103,13 @@ if not st.session_state.messages:
     with st.chat_message("assistant"):
         st.markdown(
             "Hello! I'm your **Legal Contract Intelligence** assistant.\n\n"
-            "Upload your contract PDFs in the sidebar and click **Build Index**, "
+            "Upload your contract PDFs in the sidebar, "
             "then ask me anything — clauses, amendments, deadlines, defined terms, and more."
         )
 
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        if msg["role"] == "assistant" and i in st.session_state.debug_data:
-            debug = st.session_state.debug_data[i]
-            render_route_badge(debug)
-            render_mcp_tools(debug)
-            render_full_doc_info(debug)
-            render_sources(debug)
 
 # ── Chat input ────────────────────────────────────────────────────────────────
 
@@ -132,8 +121,7 @@ if prompt := st.chat_input("Ask about your contracts…"):
     with st.chat_message("assistant"):
         if not st.session_state.get("indexed"):
             reply = (
-                "Please upload your contract PDFs and click **Build Index** "
-                "in the sidebar before asking questions."
+                "Please upload your contract PDFs in the sidebar before asking questions."
             )
             st.markdown(reply)
             st.session_state.messages.append({"role": "assistant", "content": reply})
@@ -167,13 +155,7 @@ if prompt := st.chat_input("Ask about your contracts…"):
                     st.caption(f"Reason: {response.get('reasoning', '')}")
                 else:
                     reply = response["answer"]
-                    render_route_badge(response)
                     st.markdown(reply)
-                    next_idx = len(st.session_state.messages)
-                    st.session_state.debug_data[next_idx] = response
-                    render_mcp_tools(response)
-                    render_full_doc_info(response)
-                    render_sources(response)
 
                 st.session_state.messages.append({"role": "assistant", "content": reply})
             except Exception:
