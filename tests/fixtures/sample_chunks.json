@@ -1,0 +1,35 @@
+[
+  {
+    "text": "Payment shall be made within 30 days of invoice. Late payments accrue interest at 1.5% per month.",
+    "source": "MSA-2026-014.pdf",
+    "page": 3,
+    "heading": "Section 5 Payment Terms",
+    "source_doc": "MSA-2026-014",
+    "counterparty": "Northwind Logistics Private Limited",
+    "effective_date": "2026-01-14",
+    "doc_type": "msa",
+    "clause_ref": "Section 5"
+  },
+  {
+    "text": "Either party may terminate this agreement with 30 days written notice.",
+    "source": "MSA-2026-014.pdf",
+    "page": 7,
+    "heading": "Section 9 Termination",
+    "source_doc": "MSA-2026-014",
+    "counterparty": "Northwind Logistics Private Limited",
+    "effective_date": "2026-01-14",
+    "doc_type": "msa",
+    "clause_ref": "Section 9"
+  },
+  {
+    "text": "Amendment No. 1 changes the payment period from 30 days to 45 days.",
+    "source": "AMD-2026-014-01.pdf",
+    "page": 1,
+    "heading": "Section 1 Payment Amendment",
+    "source_doc": "AMD-2026-014-01",
+    "counterparty": "Northwind Logistics Private Limited",
+    "effective_date": "2026-06-01",
+    "doc_type": "amendment",
+    "clause_ref": "Section 1"
+  }
+]
