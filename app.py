@@ -7,12 +7,38 @@ from core.logging_setup import configure_logging
 configure_logging()
 
 import streamlit as st
+from groq import Groq
 
 from core import config
 from ingestion.pdf_loader import load_pdf
 from ingestion.chunker import chunk_document
 from retrieval.vector_store import build_index, clear_index
 from router.agent import route as router_route
+
+_NO_DOC_SYSTEM = (
+    "You are a friendly Legal Contract Intelligence assistant. "
+    "The user has not yet uploaded any contract documents. "
+    "Respond warmly and helpfully — acknowledge what they said or asked, "
+    "and naturally guide them to upload a contract PDF so you can assist them properly. "
+    "Keep it conversational, short (2-3 sentences), and never repeat the same phrasing twice. "
+    "Do NOT answer legal questions without documents — redirect creatively."
+)
+
+
+def _no_doc_reply(user_message: str) -> str:
+    """Call Groq to generate a unique, context-aware no-document reply."""
+    try:
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        resp = client.chat.completions.create(
+            model=config.GENERATION_MODEL,
+            messages=[
+                {"role": "system", "content": _NO_DOC_SYSTEM},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        return resp.choices[0].message.content or "Please upload a contract PDF in the sidebar to get started!"
+    except Exception:
+        return "Please upload your contract PDFs in the sidebar — I'll be ready to help the moment they're indexed!"
 
 st.set_page_config(
     page_title="Legal Contract Intelligence",
@@ -102,9 +128,9 @@ st.title("⚖️ Legal Contract Intelligence")
 if not st.session_state.messages:
     with st.chat_message("assistant"):
         st.markdown(
-            "Hello! I'm your **Legal Contract Intelligence** assistant.\n\n"
-            "Upload your contract PDFs in the sidebar, "
-            "then ask me anything — clauses, amendments, deadlines, defined terms, and more."
+            "### Welcome to Legal Contract Intelligence! ⚖️\n\n"
+            "I'm your AI-powered contract analyst. \n\n"
+            "**Get started:** upload one or more contract PDFs using the sidebar, then ask me anything."
         )
 
 for i, msg in enumerate(st.session_state.messages):
@@ -120,9 +146,8 @@ if prompt := st.chat_input("Ask about your contracts…"):
 
     with st.chat_message("assistant"):
         if not st.session_state.get("indexed"):
-            reply = (
-                "Please upload your contract PDFs in the sidebar before asking questions."
-            )
+            with st.spinner("Thinking…"):
+                reply = _no_doc_reply(prompt)
             st.markdown(reply)
             st.session_state.messages.append({"role": "assistant", "content": reply})
         else:

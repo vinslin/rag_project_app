@@ -1,5 +1,5 @@
 """Maximal Marginal Relevance (MMR) for diversity-aware chunk selection.
-
+    MMR in RAG ensures that the retrieved documents are relevant to the query and are not too similar to each other.
     MMR = argmax [ λ · sim(d, q) - (1-λ) · max sim(d, d_selected) ]
 """
 

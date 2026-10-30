@@ -2,6 +2,17 @@
 
 RRF score for a document d:
     RRF(d) = Σ  1 / (k + rank_r(d))    for each ranker r
+
+    Reciprocal Rank Fusion
+Combines retrieval methods: Merges results from keyword and semantic search.
+
+Improves ranking robustness: Uses evidence from multiple ranked lists.
+
+Reduces dependence on one retriever: A document can rank well because multiple methods find it useful.
+
+Improves recall potential: Can bring forward relevant documents that one retrieval method alone might rank poorly.
+
+
 """
 
 from core import config
