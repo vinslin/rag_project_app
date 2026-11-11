@@ -14,6 +14,7 @@ from generation.generator import get_generator
 from generation.prompts import PROMPT_VERSION
 from guardrails.checker import screen_query
 from core.request_logger import log_request
+from core.observability import observe, lf_client, flush as lf_flush
 
 
 def _detect_metadata_filter(query: str) -> dict | None:
@@ -22,6 +23,7 @@ def _detect_metadata_filter(query: str) -> dict | None:
     return None
 
 
+@observe(name="answer_question")
 def answer_question(
     query: str,
     document_type: str | None = None,
@@ -44,6 +46,11 @@ def answer_question(
     """
     t_start = time.perf_counter()
 
+    lf_client.update_current_span(
+        input={"query": query, "search_mode": search_mode or config.SEARCH_MODE},
+        metadata={"document_type": document_type, "backend": backend},
+    )
+
     allowed, reason = screen_query(query)
     if not allowed:
         answer = config.GUARDRAIL_ANSWER if reason == "injection" else config.NO_DRAFTING_ANSWER
@@ -58,6 +65,11 @@ def answer_question(
             "confidence":   "high",
             "out_of_scope": True,
         }
+        lf_client.update_current_span(
+            output={"answer": answer, "route": "guardrail", "out_of_scope": True},
+            level="WARNING",
+        )
+        lf_flush()
         if log:
             log_request(
                 query=query,
@@ -99,6 +111,22 @@ def answer_question(
             "confidence":  "low",
             "out_of_scope": False,
         }
+
+    lf_client.update_current_span(
+        output={
+            "answer":      result.get("answer", ""),
+            "confidence":  result.get("confidence", ""),
+            "out_of_scope": result.get("out_of_scope", False),
+            "n_sources":   len(result.get("sources", [])),
+        },
+        metadata={
+            "spans_ms":       result.get("_spans_ms", {}),
+            "input_tokens":   result.get("_input_tokens", 0),
+            "output_tokens":  result.get("_output_tokens", 0),
+            "prompt_version": result.get("_prompt_version", PROMPT_VERSION),
+        },
+    )
+    lf_flush()
 
     if log:
         log_request(
