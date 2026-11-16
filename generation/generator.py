@@ -6,6 +6,7 @@ from core import config
 from retrieval.vector_store import retrieve, get_collection
 from generation.prompts import SYSTEM_PROMPT, PROMPT_VERSION
 from core.llm_client import get_client, groq_call_with_retry
+from core.observability import observe, lf_client
 
 client = get_client()
 
@@ -125,6 +126,7 @@ class GeminiGenerator:
     def __init__(self, model: str | None = None):
         self.model = model or config.GENERATION_MODEL
 
+    @observe(name="generate")
     def generate(
         self,
         query: str,
@@ -148,6 +150,11 @@ class GeminiGenerator:
         if cp:
             cp_filter = {"counterparty": {"$eq": cp}}
             where = {"$and": [where, cp_filter]} if where else cp_filter
+
+        lf_client.update_current_span(
+            input={"query": query, "search_mode": search_mode, "retrieval_k": retrieval_k},
+            metadata={"model": self.model, "counterparty": cp},
+        )
 
         # ── Stage 1: Retrieval ────────────────────────────────────────────
         t_retrieval_start = time.perf_counter()
@@ -177,6 +184,7 @@ class GeminiGenerator:
             retrieval_label += " (no-filter fallback)"
 
         retrieval_ms = (time.perf_counter() - t_retrieval_start) * 1000
+        _n_retrieved = len((results.get("documents") or [[]])[0])
 
         if not results["documents"] or not results["documents"][0]:
             return {
@@ -239,6 +247,7 @@ class GeminiGenerator:
             reranked["mmr_scores"] = [mmr_map.get(d) for d in reranked["documents"][0]]
 
         reranking_ms = (time.perf_counter() - t_rerank_start) * 1000
+        _n_reranked = len((reranked.get("documents") or [[]])[0])
 
         # Extract chunk IDs for observability before building context
         retrieved_context_ids = _extract_chunk_ids(reranked)
@@ -271,6 +280,7 @@ USER QUESTION:
 """
         messages = list(conversation_history or [])
         messages.append({"role": "user", "content": prompt})
+
         response = groq_call_with_retry(client, model=self.model, messages=messages)
 
         generation_ms = (time.perf_counter() - t_gen_start) * 1000
@@ -281,6 +291,23 @@ USER QUESTION:
         if hasattr(response, "usage") and response.usage:
             input_tokens  = getattr(response.usage, "prompt_tokens",     0) or 0
             output_tokens = getattr(response.usage, "completion_tokens", 0) or 0
+
+        lf_client.update_current_span(
+            output={"answer": response.choices[0].message.content},
+            metadata={
+                "model":           self.model,
+                "prompt_version":  PROMPT_VERSION,
+                "n_context_chunks": _n_reranked,
+                "retrieval_label": retrieval_label,
+                "input_tokens":    input_tokens,
+                "output_tokens":   output_tokens,
+                "spans_ms": {
+                    "retrieval":  round(retrieval_ms,  1),
+                    "reranking":  round(reranking_ms,  1),
+                    "generation": round(generation_ms, 1),
+                },
+            },
+        )
 
         n_rrf = len(results.get("documents", [[]])[0])
         n_mmr = len(mmr_results.get("documents", [[]])[0])

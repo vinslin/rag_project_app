@@ -204,7 +204,37 @@ def _run_mcp_loop(
     tools_called: list[ToolCall] = []
 
     for _ in range(max_iters):
-        resp = _llm_call(client, messages, tools=groq_tools, _acc=_acc)
+        try:
+            resp = _llm_call(client, messages, tools=groq_tools, _acc=_acc)
+        except Exception as exc:
+            err = str(exc)
+            if "output_parse_failed" in err or "tool_use_failed" in err:
+                logger.warning(
+                    "[MCP] Parse failure after %d tool call(s) — synthesizing from gathered data",
+                    len(tools_called),
+                )
+                # Build a clean synthesis request from the tool results already gathered
+                tool_results = "\n\n".join(
+                    m["content"] for m in messages if m.get("role") == "tool"
+                )
+                synth_messages = [
+                    {"role": "system", "content": MCP_LOOP_SYSTEM},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Here are the company contract standards retrieved so far:\n\n"
+                            f"{tool_results}\n\n"
+                            "Provide a complete, structured summary of these standards."
+                        ),
+                    },
+                ]
+                try:
+                    synth_resp = _llm_call(client, synth_messages, _acc=_acc)
+                    return synth_resp.choices[0].message.content or "", tools_called
+                except Exception:
+                    logger.exception("[MCP] Synthesis fallback also failed")
+                return tool_results or "Standards partially retrieved.", tools_called
+            raise
         msg = resp.choices[0].message
 
         if not msg.tool_calls:
